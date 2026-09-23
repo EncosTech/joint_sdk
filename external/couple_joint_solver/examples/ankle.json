@@ -1,0 +1,59 @@
+{
+  "calibration": {
+    "leftJointCenter": {
+      "x": -27.5,
+      "y": 0,
+      "z": 260
+    },
+    "rightJointCenter": {
+      "x": -27.5,
+      "y": 0,
+      "z": 200
+    },
+    "leftPlanarEndpoint": {
+      "x": -27.5,
+      "y": 17.5,
+      "z": 266
+    },
+    "rightPlanarEndpoint": {
+      "x": -27.5,
+      "y": -17.5,
+      "z": 206
+    },
+    "rollCenter": {
+      "x": 0,
+      "y": 0,
+      "z": -30
+    },
+    "pitchCenter": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "leftSpatialEndpoint": {
+      "x": -24.76,
+      "y": 12,
+      "z": 3.48
+    },
+    "rightSpatialEndpoint": {
+      "x": -24.76,
+      "y": -12,
+      "z": 3.48
+    },
+    "rotateDirection": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "useRotateDirection": false,
+    "rotationOrder": 0
+  },
+  "rollLimit": {
+    "min": null,
+    "max": null
+  },
+  "pitchLimit": {
+    "min": null,
+    "max": null
+  }
+}

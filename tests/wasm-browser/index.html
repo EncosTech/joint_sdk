@@ -1,0 +1,17 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: 2026 Encos
+     SPDX-License-Identifier: MIT -->
+
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>joint_sdk WASM Browser Test Fixture</title>
+  </head>
+  <body>
+    <script type="module">
+      import { createJointRuntime } from '/npm/dist/index.js'
+      window.JointSDK = { createJointRuntime }
+    </script>
+  </body>
+</html>
