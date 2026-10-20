@@ -63,6 +63,11 @@ export interface AdapterDefinition {
   name: string
   loggerName?: string
   logLevel?: number
+  /**
+   * 适配器扩展配置，字段语义由插件自行定义（如 `{ buses: [...] }`）。
+   * 适配器已存在时由驱动器把其中的 `buses` 增量应用到既有实例。
+   */
+  extend?: Record<string, unknown>
 }
 
 export interface JointStatus {
@@ -111,27 +116,6 @@ export interface StopCommand {
   mode: number
   current?: number
   feedback?: number
-}
-
-export interface GotoLimitCommand {
-  dir: number
-  speed?: number
-  current?: number
-  timeoutMs?: number
-}
-
-export interface GotoZeroCommand {
-  offset: number
-  speed?: number
-  current?: number
-  timeoutMs?: number
-}
-
-export interface CalibrateCommand {
-  dir: number
-  speed?: number
-  current?: number
-  timeoutMs?: number
 }
 
 export interface Range {

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -57,11 +58,18 @@ public:
             throw std::invalid_argument("RJoint motor must not be null");
         }
         motor_ = motor;
-        const auto ranges = motor_->GetPVTRanges();
+        const auto ranges = motor_->GetProperties();
         if (!std::isfinite(ranges.kt) || ranges.kt <= 0.0f) {
             throw std::invalid_argument("RJoint motor kt must be positive");
         }
         maxCur_ = config.maxTor / ranges.kt;
+        InstallStatusDispatcher(ranges.kt);
+    }
+
+    ~RJoint() override {
+        if (motor_) {
+            motor_->SetOnStatus(nullptr);
+        }
     }
 
     /**
@@ -82,6 +90,7 @@ public:
      * @throw std::invalid_argument 当任一控制输入不是有限值时抛出。
      */
     void PVTControl(float kp, float kd, float pos, float spd, float torque) override {
+        RecordPVTCommandForLog(kp, kd, pos, spd, torque, PVTControlMode::MotorPVT);
         RejectNonFiniteControlInput("PVT", kp, kd, pos, spd, torque);
         spd = ClampControl(spd, -maxSpd_, maxSpd_, "PVT", "speed");
         torque = ClampControl(torque, -maxTor_, maxTor_, "PVT", "torque");
@@ -101,7 +110,7 @@ public:
             SendLimitHold(motor_pos, 1);
             return;
         }
-        const auto ranges = motor_->GetPVTRanges();
+        const auto ranges = motor_->GetProperties();
         motor_->PVTControl<0>(
             ClampControl(kp, ranges.kp.min, ranges.kp.max, "PVT", "motor kp"),
             ClampControl(kd, ranges.kd.min, ranges.kd.max, "PVT", "motor kd"),
@@ -119,6 +128,7 @@ public:
      * @throw std::invalid_argument 当任一控制输入不是有限值时抛出。
      */
     void PosControl(float pos, float spd = 0, float current = 0, int feedback = 1) override {
+        RecordPosCommandForLog(pos, spd, current, feedback);
         RejectNonFiniteControlInput("PosControl", pos, spd, current);
         if (reverse_)
             pos = -pos;
@@ -141,6 +151,7 @@ public:
      * @throw std::invalid_argument 当任一控制输入不是有限值时抛出。
      */
     void SpdControl(float spd, float current = 0, int feedback = 1) override {
+        RecordSpdCommandForLog(spd, current, feedback);
         RejectNonFiniteControlInput("SpdControl", spd, current);
         if (reverse_)
             spd = -spd;
@@ -167,6 +178,7 @@ public:
      * @throw std::invalid_argument 当 current 不是有限值时抛出。
      */
     void CurControl(float current = 0, int feedback = 1) override {
+        RecordCurCommandForLog(current, feedback);
         RejectNonFiniteControlInput("CurControl", current);
         if (reverse_)
             current = -current;
@@ -190,6 +202,7 @@ public:
      * @throw std::invalid_argument 当 torque 不是有限值时抛出。
      */
     void TorControl(float torque = 0, int feedback = 1) override {
+        RecordTorCommandForLog(torque, feedback);
         RejectNonFiniteControlInput("TorControl", torque);
         if (reverse_)
             torque = -torque;
@@ -206,6 +219,31 @@ public:
         motor_->TorControl<0>(torque, feedback);
     }
 
+    /** @brief 查询底层电机是否带机械抱闸。 */
+    bool HasBrake() const override {
+        return motor_->HasBrake();
+    }
+
+    /** @brief 控制机械抱闸：true 抱紧，false 释放，返回驱动操作结果。 */
+    bool Brake(bool enabled) override {
+        RecordBrakeCommandForLog(enabled);
+        if (!HasBrake()) {
+            WarnProtection("Brake", "The current joint does not use brake-equipped motors");
+            return false;
+        }
+        return motor_->Brake(enabled);
+    }
+
+    /** @brief 查询机械抱闸状态；协议值 0 表示抱紧，1 表示释放。 */
+    bool GetBrakeStatus() override {
+        if (!HasBrake()) {
+            WarnProtection("GetBrakeStatus",
+                           "The current joint does not use brake-equipped motors");
+            return false;
+        }
+        return motor_->GetParameter<MotorParameter::BrakeStatus>() == 0;
+    }
+
     /**
      * @brief 向底层电机发送停止命令。
      * @param mode 停止模式。
@@ -213,53 +251,13 @@ public:
      * @param feedback 底层电机反馈模式。
      */
     void Stop(MotorStopMode mode, float current = 0, int feedback = 1) override {
+        RecordStopCommandForLog(mode, current, feedback);
         const bool finite_current = std::isfinite(current);
         LogProtection("Stop", "non-finite current; using zero", !finite_current);
         if (!finite_current) {
             current = 0.0f;
         }
         motor_->Stop<0>(mode, current, feedback);
-    }
-
-    /**
-     * @brief 将当前电机位置重置为零点。
-     * @return 底层电机 ResetZeroPos() 的执行结果。
-     */
-    bool SetZero() override {
-        return motor_->ResetZeroPos();
-    }
-
-    /**
-     * @brief 驱动旋转关节搜索指定方向的限位。
-     * @param dir 搜索方向，关节坐标系；正数表示正向，负数表示负向。
-     * @param spd 搜索速度，单位 rad/s。
-     * @param cur 搜索电流上限，单位 A。
-     * @param timeout 搜索超时时间。
-     * @return 零点偏移量，单位 rad，关节坐标系；失败时返回 NaN。
-     */
-    float GotoLimit(int dir, float spd = 2.f, float cur = 2.f,
-                    std::chrono::milliseconds timeout = std::chrono::milliseconds{5000}) override {
-        if (reverse_)
-            dir = -dir;
-        float offset = motor_->GotoLimit(limit_, dir, spd, cur, timeout);
-        if (reverse_)
-            offset = -offset;
-        return offset;
-    }
-
-    /**
-     * @brief 按偏移量驱动关节回到零点。
-     * @param offset 零点偏移量，单位 rad，关节坐标系。
-     * @param spd 回零速度，单位 rad/s。
-     * @param cur 回零电流上限，单位 A。
-     * @param timeout 回零超时时间。
-     * @return true 表示底层电机回零成功。
-     */
-    bool GotoZero(float offset, float spd = 2.f, float cur = 2.f,
-                  std::chrono::milliseconds timeout = std::chrono::milliseconds{5000}) override {
-        if (reverse_)
-            offset = -offset;
-        return motor_->GotoZero(offset, spd, cur, timeout);
     }
 
     /**
@@ -281,22 +279,6 @@ public:
     }
 
     /**
-     * @brief 执行旋转关节限位校准流程。
-     * @param dir 校准方向，关节坐标系。
-     * @param spd 校准速度，单位 rad/s。
-     * @param cur 校准电流上限，单位 A。
-     * @param timeout 限位搜索和回零各自使用的超时时间。
-     * @return true 表示限位搜索和回零均成功。
-     */
-    bool Calibrate(int dir, float spd = 2.f, float cur = 2.f,
-                   std::chrono::milliseconds timeout = std::chrono::milliseconds{5000}) override {
-        float offset = GotoLimit(dir, spd, cur, timeout);
-        if (std::isnan(offset))
-            return false;
-        return GotoZero(offset, spd, cur, timeout);
-    }
-
-    /**
      * @brief 读取旋转关节状态。
      * @param autoSendCommand 为 true 且缓存状态不可用时，发送一次 PVT 查询命令。
      * @param lifeCycleDeduction 读取状态时扣减的生命周期值。
@@ -313,7 +295,7 @@ public:
             }
             return std::nullopt;
         }
-        const float kt = motor_->GetPVTRanges().kt;
+        const float kt = motor_->GetProperties().kt;
         float dir = reverse_ ? -1.f : 1.f;
         JointStatus joint_status{};
         joint_status.pos = dir * status->position;
@@ -327,25 +309,11 @@ public:
 
     /**
      * @brief 注册或取消旋转关节状态回调。
-     * @param onStatus 状态回调；传入 nullptr 时取消底层电机回调。
+     * @param onStatus 状态回调；传入 nullptr 时取消用户回调，内部状态分发仍保持启用。
      */
     void SetOnStatus(std::function<void(const JointStatus&)> onStatus) override {
-        if (!onStatus) {
-            motor_->SetOnStatus(nullptr);
-            return;
-        }
-        const float kt = motor_->GetPVTRanges().kt;
-        const bool rev = reverse_;
-        motor_->SetOnStatus([onStatus = std::move(onStatus), kt, rev](const MotorStatus& s) {
-            JointStatus joint_status{};
-            joint_status.pos = rev ? -s.position : s.position;
-            joint_status.spd = rev ? -s.speed : s.speed;
-            joint_status.tor = rev ? -s.current * kt : s.current * kt;
-            joint_status.mosTemperature = s.mos_temperature;
-            joint_status.motorTemperature = s.motor_temperature;
-            joint_status.error = s.error;
-            onStatus(joint_status);
-        });
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        status_callback_ = std::move(onStatus);
     }
 
     /**
@@ -372,7 +340,7 @@ public:
      * @return 扭矩常数，单位 Nm/A。
      */
     float GetTorqueConstant() const {
-        return motor_->GetPVTRanges().kt;
+        return motor_->GetProperties().kt;
     }
 
     /**
@@ -418,6 +386,30 @@ public:
 protected:
     Motor* motor_{nullptr};  ///< Bus-owned, non-owning motor instance
     float maxCur_;           ///< 最大电流
+    std::mutex status_mutex_;
+    std::function<void(const JointStatus&)> status_callback_;
+
+    void InstallStatusDispatcher(float kt) {
+        const bool rev = reverse_;
+        motor_->SetOnStatus([this, kt, rev](const MotorStatus& s) {
+            JointStatus joint_status{};
+            joint_status.pos = rev ? -s.position : s.position;
+            joint_status.spd = rev ? -s.speed : s.speed;
+            joint_status.tor = rev ? -s.current * kt : s.current * kt;
+            joint_status.mosTemperature = s.mos_temperature;
+            joint_status.motorTemperature = s.motor_temperature;
+            joint_status.error = s.error;
+            RecordStatusForLog(joint_status);
+            std::function<void(const JointStatus&)> callback;
+            {
+                std::lock_guard<std::mutex> lock(status_mutex_);
+                callback = status_callback_;
+            }
+            if (callback) {
+                callback(joint_status);
+            }
+        });
+    }
 
     /**
      * @brief 验证控制输入均为有限值，失败时先停止电机。

@@ -21,19 +21,28 @@ namespace encos {
  * @brief 双电机关节从关节。
  *
  * SlaveJoint 是 DoubleCoupleJoint 的从动侧代理关节，不持有实际电机资源。
- * 除 Stop() 外的所有控制操作均转发至配对的 MasterJoint 的 *ForSlave 方法，
+ * 所有控制操作直接调用配对 MasterJoint 的带轴内部入口，
  * 由 MasterJoint 统一完成双电机运动学解算后再下发。
  */
 class SlaveJoint : public BaseJoint {
 public:
-    /**
-     * @brief 将当前位置设为零点。
-     * @return true 表示成功，false 表示失败。
-     * @note 委托给配对的 MasterJoint::SetZero() 执行。
-     */
-    bool SetZero() override {
+    /** @brief 查询整组双电机是否都带机械抱闸。 */
+    bool HasBrake() const override {
         EnsureBound();
-        return master_->SetZero();
+        return master_->HasBrake();
+    }
+
+    /** @brief 委托主关节控制两台电机的抱闸：true 抱紧，false 释放。 */
+    bool Brake(bool enabled) override {
+        RecordBrakeCommandForLog(enabled);
+        EnsureBound();
+        return master_->Brake(enabled);
+    }
+
+    /** @brief 委托主关节查询并同步整组双电机抱闸状态。 */
+    bool GetBrakeStatus() override {
+        EnsureBound();
+        return master_->GetBrakeStatus();
     }
 
     /**
@@ -52,7 +61,7 @@ public:
      * @param pos 目标位置（关节坐标系）。
      * @param spd 目标速度（关节坐标系）。
      * @param torque 目标力矩。
-     * @note 委托给 MasterJoint::PVTControlForSlave()，由 MasterJoint 解算为双电机指令后下发。
+     * @note 委托给 MasterJoint::ControlPVT()，由 MasterJoint 解算为双电机指令后下发。
      */
     void PVTControl(float kp, float kd, float pos, float spd, float torque) override {
         PVTControl(kp, kd, pos, spd, torque, PVTControlMode::MotorPVT);
@@ -64,8 +73,9 @@ public:
      */
     void PVTControl(float kp, float kd, float pos, float spd, float torque,
                     PVTControlMode torque_mode) override {
+        RecordPVTCommandForLog(kp, kd, pos, spd, torque, torque_mode);
         EnsureBound();
-        master_->PVTControlForSlave(kp, kd, pos, spd, torque, torque_mode);
+        master_->ControlPVT(axis_, kp, kd, pos, spd, torque, torque_mode);
     }
 
     /**
@@ -74,11 +84,12 @@ public:
      * @param speed 目标速度。
      * @param current 目标电流。
      * @param feedback 反馈源选择。
-     * @note 委托给 MasterJoint::PosControlForSlave()，由 MasterJoint 解算为双电机指令后下发。
+     * @note 委托给 MasterJoint::ControlPosition()，由 MasterJoint 解算为双电机指令后下发。
      */
     void PosControl(float position, float speed = 0, float current = 0, int feedback = 1) override {
+        RecordPosCommandForLog(position, speed, current, feedback);
         EnsureBound();
-        master_->PosControlForSlave(position, speed, current, feedback);
+        master_->ControlPosition(axis_, position, speed, current, feedback);
     }
 
     /**
@@ -86,33 +97,39 @@ public:
      * @param speed 目标速度（关节坐标系）。
      * @param current 目标电流。
      * @param feedback 反馈源选择。
-     * @note 委托给 MasterJoint::SpdControlForSlave()，由 MasterJoint 解算为双电机指令后下发。
+     * @note 委托给 MasterJoint::ControlDynamic()，由 MasterJoint 解算为双电机指令后下发。
      */
     void SpdControl(float speed, float current = 0, int feedback = 1) override {
+        RecordSpdCommandForLog(speed, current, feedback);
         EnsureBound();
-        master_->SpdControlForSlave(speed, current, feedback);
+        master_->ControlDynamic(MasterJoint::DynamicControlMode::Speed, axis_, speed, current,
+                                feedback);
     }
 
     /**
      * @brief 电流控制。
      * @param current 目标电流。
      * @param feedback 反馈源选择。
-     * @note 委托给 MasterJoint::CurControlForSlave()，由 MasterJoint 解算为双电机指令后下发。
+     * @note 委托给 MasterJoint::ControlDynamic()，由 MasterJoint 解算为双电机指令后下发。
      */
     void CurControl(float current = 0, int feedback = 1) override {
+        RecordCurCommandForLog(current, feedback);
         EnsureBound();
-        master_->CurControlForSlave(current, feedback);
+        master_->ControlDynamic(MasterJoint::DynamicControlMode::Current, axis_, current, 0.0f,
+                                feedback);
     }
 
     /**
      * @brief 力矩控制。
      * @param torque 目标力矩。
      * @param feedback 反馈源选择。
-     * @note 委托给 MasterJoint::TorControlForSlave()，由 MasterJoint 解算为双电机指令后下发。
+     * @note 委托给 MasterJoint::ControlDynamic()，由 MasterJoint 解算为双电机指令后下发。
      */
     void TorControl(float torque = 0, int feedback = 1) override {
+        RecordTorCommandForLog(torque, feedback);
         EnsureBound();
-        master_->TorControlForSlave(torque, feedback);
+        master_->ControlDynamic(MasterJoint::DynamicControlMode::Torque, axis_, torque, 0.0f,
+                                feedback);
     }
 
     /**
@@ -123,40 +140,9 @@ public:
      * @note 委托给 MasterJoint::Stop() 执行，MasterJoint 会同时停止 Master 和 Slave 两侧电机。
      */
     void Stop(MotorStopMode mode, float current = 0, int feedback = 1) override {
+        RecordStopCommandForLog(mode, current, feedback);
         EnsureBound();
         master_->Stop(mode, current, feedback);
-    }
-
-    /**
-     * @brief 运行到限位（未实现）。
-     * @param dir 方向。
-     * @param spd 运行速度。
-     * @param cur 运行电流。
-     * @param timeout 超时时间。
-     * @return 始终返回 NaN。
-     * @note 双电机关节的限位运行尚未实现，当前调用将直接返回 NaN。
-     */
-    float GotoLimit([[maybe_unused]] int dir, [[maybe_unused]] float spd = 2.f,
-                    [[maybe_unused]] float cur = 2.f,
-                    [[maybe_unused]] std::chrono::milliseconds timeout = std::chrono::milliseconds{
-                        5000}) override {
-        return std::nanf("");
-    }
-
-    /**
-     * @brief 回到零点（未实现）。
-     * @param offset 零点偏移。
-     * @param spd 运行速度。
-     * @param cur 运行电流。
-     * @param timeout 超时时间。
-     * @return 始终返回 false。
-     * @note 双电机关节的回零操作尚未实现，当前调用将直接返回 false。
-     */
-    bool GotoZero([[maybe_unused]] float offset, [[maybe_unused]] float spd = 2.f,
-                  [[maybe_unused]] float cur = 2.f,
-                  [[maybe_unused]] std::chrono::milliseconds timeout = std::chrono::milliseconds{
-                      5000}) override {
-        return false;
     }
 
     /**
@@ -170,27 +156,11 @@ public:
     }
 
     /**
-     * @brief 校准（未实现）。
-     * @param dir 方向。
-     * @param spd 校准速度。
-     * @param cur 校准电流。
-     * @param timeout 超时时间。
-     * @return 始终返回 false。
-     * @note 双电机关节的校准尚未实现，当前调用将直接返回 false。
-     */
-    bool Calibrate([[maybe_unused]] int dir, [[maybe_unused]] float spd = 2.f,
-                   [[maybe_unused]] float cur = 2.f,
-                   [[maybe_unused]] std::chrono::milliseconds timeout = std::chrono::milliseconds{
-                       5000}) override {
-        return false;
-    }
-
-    /**
      * @brief 获取关节状态。
      * @param autoSendCommand 是否自动发送命令。
      * @param lifeCycleDeduction 生命周期扣减。
      * @return 关节状态，包含双电机数据经运动学合成后的结果。
-     * @note 委托给 MasterJoint::GetStatusForSlave()，由 MasterJoint 读取双电机状态后
+     * @note 委托给 MasterJoint::GetStatusForAxis()，由 MasterJoint 读取双电机状态后
      *       合成从关节侧的关节状态返回。
      * @warning 关节运动过程中不得将 autoSendCommand 设为 true；内部零目标 PVT 反馈命令
      *          可能改变双电机关节运动状态。
@@ -198,23 +168,23 @@ public:
     std::optional<JointStatus> GetStatus(bool autoSendCommand = false,
                                          [[maybe_unused]] int lifeCycleDeduction = 1) override {
         EnsureBound();
-        return master_->GetStatusForSlave(autoSendCommand, 0);
+        return master_->GetStatusForAxis(axis_, autoSendCommand, 0);
     }
 
     /**
      * @brief 注册状态回调。
      * @param onStatus 状态到达时调用的回调函数。
-     * @note 委托给 MasterJoint::SetOnStatusForSlave()，回调触发时携带从关节侧的合成状态。
+     * @note 委托给 MasterJoint::SetOnStatusForAxis()，回调触发时携带从关节侧的合成状态。
      */
     void SetOnStatus(std::function<void(const JointStatus&)> onStatus) override {
         if (!onStatus) {
             if (master_) {
-                master_->SetOnStatusForSlave(nullptr);
+                master_->SetOnStatusForAxis(axis_, nullptr);
             }
             return;
         }
         EnsureBound();
-        master_->SetOnStatusForSlave(std::move(onStatus));
+        master_->SetOnStatusForAxis(axis_, std::move(onStatus));
     }
 
 private:
@@ -267,6 +237,13 @@ private:
     /** 配对前暂存的电机 2 相对位置限位。 */
     std::optional<Range<float>> motor_limit2_;
 };
+
+inline void RecordSlaveStatusForLog(const std::shared_ptr<SlaveJoint>& slave,
+                                    const JointStatus& status) noexcept {
+    if (slave) {
+        slave->RecordStatusForLog(status);
+    }
+}
 
 /**
  * @brief 获取 master 或 slave 轴的运行时参数。

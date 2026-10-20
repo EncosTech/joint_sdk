@@ -74,29 +74,28 @@ export class JointWrapper {
     await this.native.jointStop(this.handle, mode, current, feedback)
   }
 
-  setZero(): Promise<boolean> {
+
+  /** 整个关节是否具备机械抱闸；双电机必须两台都支持。 */
+  hasBrake(): boolean {
     this.assertAlive()
-    return this.native.jointSetZero(this.handle)
+    return this.native.jointHasBrake(this.handle)
   }
 
-  gotoLimit(dir: number, speed: number, current: number, timeoutMs: number): Promise<number> {
+  /** 控制整个关节的机械抱闸：true 抱紧，false 释放；所有电机操作成功才返回 true。 */
+  brake(enabled: boolean): Promise<boolean> {
     this.assertAlive()
-    return this.native.jointGotoLimit(this.handle, dir, speed, current, timeoutMs)
+    return this.native.jointBrake(this.handle, enabled)
   }
 
-  gotoZero(offset: number, speed: number, current: number, timeoutMs: number): Promise<boolean> {
+  /** 任一电机抱紧即返回 true；双电机状态不一致时向未抱紧的一台补发抱闸。 */
+  getBrakeStatus(): Promise<boolean> {
     this.assertAlive()
-    return this.native.jointGotoZero(this.handle, offset, speed, current, timeoutMs)
+    return this.native.jointGetBrakeStatus(this.handle)
   }
 
   posAsOffset(dir: number): number {
     this.assertAlive()
     return this.native.jointPosAsOffset(this.handle, dir)
-  }
-
-  calibrate(dir: number, speed: number, current: number, timeoutMs: number): Promise<boolean> {
-    this.assertAlive()
-    return this.native.jointCalibrate(this.handle, dir, speed, current, timeoutMs)
   }
 
   getStatus(options?: StatusOptions): JointStatus | null {

@@ -70,3 +70,26 @@ test('creates Fake manager and controls a joint', async ({ page }) => {
   expect(result.pos).toBeCloseTo(0.5)
   expect(result.kind).toBe(FakeCommandKind.Stop)
 })
+
+test('non-brake joint returns false without sending brake commands', async ({ page }) => {
+  await page.goto('/tests/wasm-browser/')
+  const result = await page.evaluate(async (definition) => {
+    const runtime = await window.JointSDK.createJointRuntime()
+    const manager = runtime.createJointManager({ adapterType: 'Fake', adapterName: 'fake_browser' })
+    try {
+      const joint = await manager.addJoint(definition)
+      manager.fake!.clearCommandRecords()
+      return {
+        supported: joint.hasBrake(),
+        enabled: await joint.brake(true),
+        disabled: await joint.brake(false),
+        engaged: await joint.getBrakeStatus(),
+        commandCount: manager.fake!.getCommandCount(),
+      }
+    } finally {
+      manager.dispose()
+      runtime.dispose()
+    }
+  }, rJointDefinition)
+  expect(result).toEqual({ supported: false, enabled: false, disabled: false, engaged: false, commandCount: 0 })
+})

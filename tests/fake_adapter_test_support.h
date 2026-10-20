@@ -11,9 +11,9 @@
 
 #include "adapter/base_adapter.h"
 #include "adapter/fake_adapter_control.h"
+#include "device/motor/motor.h"
+#include "device/motor/types.h"
 #include "encos_motor.h"
-#include "motor/motor.h"
-#include "motor/types.h"
 
 namespace encos {
 
@@ -75,7 +75,7 @@ inline std::shared_ptr<FakeAdapterHarness> CreateFakeAdapterHarness(
 }
 
 inline void SyncFakeRangeSnapshot(FakeAdapterHarness& adapter, Motor* motor,
-                                  const MotorPVTRanges& ranges) {
+                                  const MotorProperties& ranges) {
     adapter.SetReplyMode(FakeReplyMode::Automatic);
     (void) motor->SetPVTPosRange(ranges.position);
     (void) motor->SetPVTSpdRange(ranges.speed);

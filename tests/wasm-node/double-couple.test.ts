@@ -78,7 +78,6 @@ describe('DoubleCoupleJoint WASM smoke', () => {
     expect(roll).toBeDefined()
     expect(pitch).toBeDefined()
 
-    expect(await roll.setZero()).toBe(true)
     manager.fake!.injectFeedback(1, 1, { position: 0, speed: 0, current: 0, motorTemperature: 25, mosTemperature: 25, error: 0 })
     manager.fake!.injectFeedback(1, 2, { position: 0, speed: 0, current: 0, motorTemperature: 25, mosTemperature: 25, error: 0 })
     const status = manager.getStatus({ autoSend: false, lifeCycleDeduction: 1 })

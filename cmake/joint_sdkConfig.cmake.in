@@ -5,8 +5,7 @@
 
 include(CMakeFindDependencyMacro)
 
-find_dependency(encos_driver 3.3.2 REQUIRED CONFIG)
-find_dependency(nlohmann_json REQUIRED)
+find_dependency(encos_driver 4.0.0 REQUIRED CONFIG)
 find_dependency(couple_joint_solver REQUIRED CONFIG)
 find_dependency(Threads REQUIRED)
 

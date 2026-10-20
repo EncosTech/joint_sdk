@@ -16,12 +16,12 @@
 #include <vector>
 
 #include <gtest/gtest.h>
-#include <nlohmann/json.hpp>
 
 #include "JointManager.h"
 #include "RJoint/RJoint.h"
 #include "RJoint/StribeckModel.h"
 #include "RJoint/ZeroDampingRJoint.h"
+#include "external/json.hpp"
 #include "fake_adapter_test_support.h"
 
 using namespace encos;
@@ -36,8 +36,8 @@ struct RJointFixture {
     Motor* motor{nullptr};
 };
 
-MotorPVTRanges CreateMotorRanges() {
-    MotorPVTRanges ranges{};
+MotorProperties CreateMotorRanges() {
+    MotorProperties ranges{};
     ranges.kp = Range<float>{0.0f, 500.0f};
     ranges.kd = Range<float>{0.0f, 5.0f};
     ranges.position = Range<float>{-12.5f, 12.5f};
@@ -79,9 +79,9 @@ public:
         stop_calls.fetch_add(1, std::memory_order_relaxed);
     }
 
-    bool SetZero() override {
+    float PosAsOffset(int) override {
         synchronous_calls.fetch_add(1, std::memory_order_relaxed);
-        return true;
+        return 0.0f;
     }
 
     std::atomic<int> current_calls{0};
@@ -529,7 +529,7 @@ TEST(ZeroDampingRJointTest, LatchesWorkerFaultAndRejectsFurtherCommands) {
     }));
     EXPECT_EQ(faulting_joint->current_calls.load(std::memory_order_relaxed), 1);
     EXPECT_THROW(wrapper.TorControl(0.2f), std::runtime_error);
-    EXPECT_THROW((void) wrapper.SetZero(), std::runtime_error);
+    EXPECT_THROW((void) wrapper.PosAsOffset(1), std::runtime_error);
     EXPECT_EQ(faulting_joint->synchronous_calls.load(std::memory_order_relaxed), 0);
     std::this_thread::sleep_for(5ms);
     EXPECT_EQ(faulting_joint->current_calls.load(std::memory_order_relaxed), 1);

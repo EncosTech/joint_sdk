@@ -47,10 +47,6 @@ describe('native async wrappers', () => {
       'joint_sdk_joint_cur_control',
       'joint_sdk_joint_tor_control',
       'joint_sdk_joint_stop',
-      'joint_sdk_joint_set_zero',
-      'joint_sdk_joint_goto_limit',
-      'joint_sdk_joint_goto_zero',
-      'joint_sdk_joint_calibrate',
     ]) {
       expect(cwrapOptions.get(name)?.async, name).toBe(true)
     }
@@ -80,23 +76,83 @@ describe('native async wrappers', () => {
     expect(settled).toBe(true)
   })
 
-  it('preserves all three numeric PVT modes at the WASM boundary', async () => {
+  it('preserves all numeric PVT modes at the WASM boundary', async () => {
     const { module, calls } = createRecordingModule()
     const native = createNativeApi(module)
 
-    await native.jointPVTControl(7, 1, 2, 3, 4, 5, 0)
-    await native.jointPVTControl(7, 1, 2, 3, 4, 5, 1)
-    await native.jointPVTControl(7, 1, 2, 3, 4, 5, 2)
+    for (const mode of [0, 1, 2]) {
+      await native.jointPVTControl(7, 1, 2, 3, 4, 5, mode)
+    }
 
     expect(calls.get('joint_sdk_joint_pvt_control')).toEqual([
       [7, 1, 2, 3, 4, 5, 0], [7, 1, 2, 3, 4, 5, 1], [7, 1, 2, 3, 4, 5, 2],
     ])
   })
 
-  it.each([-1, 3, 1.5, NaN, true])('rejects invalid PVT mode %s before calling WASM', async (mode) => {
+  it.each([-1, 3, 4, 5, 6, 1.5, NaN, true])('rejects invalid PVT mode %s before calling WASM', async (mode) => {
     const { module, calls } = createRecordingModule()
     const native = createNativeApi(module)
     await expect(native.jointPVTControl(7, 1, 2, 3, 4, 5, mode as any)).rejects.toThrow(/mode/iu)
     expect(calls.get('joint_sdk_joint_pvt_control')).toBeUndefined()
+  })
+})
+
+describe('brake wrappers', () => {
+  it('keeps capability synchronous and wraps communication with Asyncify', () => {
+    const { module, cwrapOptions } = createRecordingModule()
+    createNativeApi(module)
+    expect(cwrapOptions.get('joint_sdk_joint_has_brake')?.async).not.toBe(true)
+    for (const name of ['brake', 'get_brake_status']) {
+      expect(cwrapOptions.get(`joint_sdk_joint_${name}`)?.async).toBe(true)
+    }
+  })
+
+  it.each([0, 1])('preserves native boolean output %s through JointWrapper', async (value) => {
+    const { module, calls } = createRecordingModule()
+    module.getValue = () => value
+    const joint = new JointWrapper(createNativeApi(module), 17, 'brake_joint')
+    expect(joint.hasBrake()).toBe(value !== 0)
+    expect(await joint.brake(true)).toBe(value !== 0)
+    expect(await joint.brake(false)).toBe(value !== 0)
+    expect(await joint.getBrakeStatus()).toBe(value !== 0)
+    expect(calls.get('joint_sdk_joint_brake')).toEqual([[17, 1, 8], [17, 0, 8]])
+    for (const name of ['has_brake', 'get_brake_status']) {
+      expect(calls.get(`joint_sdk_joint_${name}`)).toEqual([[17, 8]])
+    }
+  })
+
+  it.each(['brake', 'getBrakeStatus'] as const)(
+    'waits for %s and preserves rejection', async (method) => {
+      let resolveNative: ((value: boolean) => void) | undefined
+      const nativeMethod = {
+        brake: 'jointBrake',
+        getBrakeStatus: 'jointGetBrakeStatus',
+      }[method]
+      const native = {
+        [nativeMethod]: () => new Promise<boolean>((resolve) => { resolveNative = resolve }),
+      } as unknown as NativeApi
+      const joint = new JointWrapper(native, 1, 'brake_joint')
+      const invoke = () => method === 'brake' ? joint.brake(true) : joint.getBrakeStatus()
+      let settled = false
+      const pending = invoke().then((value) => { settled = true; return value })
+      await Promise.resolve()
+      expect(settled).toBe(false)
+      resolveNative!(true)
+      expect(await pending).toBe(true)
+      Object.assign(native, { [nativeMethod]: () => Promise.reject(new Error('driver failure')) })
+      await expect(invoke()).rejects.toThrow('driver failure')
+    },
+  )
+
+  it('rejects all brake calls on disposed wrappers', () => {
+    const { module, calls } = createRecordingModule()
+    const joint = new JointWrapper(createNativeApi(module), 1, 'disposed_brake_joint')
+    joint.dispose()
+    expect(() => joint.brake(true)).toThrow(/disposed/u)
+    expect(() => joint.brake(false)).toThrow(/disposed/u)
+    for (const method of ['hasBrake', 'getBrakeStatus'] as const) {
+      expect(() => joint[method]()).toThrow(/disposed/u)
+    }
+    expect(calls.has('joint_sdk_joint_has_brake')).toBe(false)
   })
 })

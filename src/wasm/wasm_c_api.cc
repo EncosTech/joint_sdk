@@ -7,7 +7,7 @@
 #include <emscripten.h>
 #include <variant>
 
-#include "motor/types.h"
+#include "device/motor/types.h"
 #include "src/wasm/wasm_runtime.h"
 
 namespace encos {
@@ -325,15 +325,19 @@ int joint_sdk_create_empty_manager(std::uint32_t* out_manager) {
 EMSCRIPTEN_KEEPALIVE
 int joint_sdk_manager_create_adapter(std::uint32_t manager, const char* adapter_type,
                                      const char* adapter_name, const char* logger_name,
-                                     int log_level) {
+                                     int log_level, const char* extend_json) {
     try {
         if (encos::wasm::RequirePointer(adapter_type, "adapter_type") != 0 ||
             encos::wasm::RequirePointer(adapter_name, "adapter_name") != 0) {
             return encos::wasm::ToInt(WasmErrorCode::kInvalidArgument);
         }
+        // extend 缺省为空指针或空串，等价于空对象
+        const auto extend = extend_json == nullptr || extend_json[0] == '\0'
+                                ? nlohmann::json::object()
+                                : nlohmann::json::parse(extend_json);
         RuntimeStore::Instance().CreateAdapter(manager, adapter_type, adapter_name,
                                                logger_name ? logger_name : adapter_name,
-                                               static_cast<encos::LogLevel>(log_level));
+                                               static_cast<encos::LogLevel>(log_level), extend);
         encos::wasm::SetOk();
         return encos::wasm::ToInt(WasmErrorCode::kOk);
     } catch (...) {
@@ -350,9 +354,10 @@ int joint_sdk_manager_create_adapter_json(std::uint32_t manager, const char* ada
         const auto definition = nlohmann::json::parse(adapter_json);
         std::string adapter_type;
         std::string adapter_name;
-        encos::ParseAdapterDefinition(definition, adapter_type, adapter_name);
+        nlohmann::json extend;
+        encos::ParseAdapterDefinition(definition, adapter_type, adapter_name, extend);
         RuntimeStore::Instance().CreateAdapter(manager, adapter_type, adapter_name, adapter_name,
-                                               encos::LogLevel::Info);
+                                               encos::LogLevel::Info, extend);
         encos::wasm::SetOk();
         return encos::wasm::ToInt(WasmErrorCode::kOk);
     } catch (...) {
@@ -619,7 +624,7 @@ int joint_sdk_joint_stop(std::uint32_t joint, int mode, float current, int feedb
 }
 
 EMSCRIPTEN_KEEPALIVE
-int joint_sdk_joint_set_zero(std::uint32_t joint, int* out_ok) {
+int joint_sdk_joint_has_brake(std::uint32_t joint, int* out_ok) {
     try {
         if (encos::wasm::RequirePointer(out_ok, "out_ok") != 0) {
             return encos::wasm::ToInt(WasmErrorCode::kInvalidArgument);
@@ -629,38 +634,16 @@ int joint_sdk_joint_set_zero(std::uint32_t joint, int* out_ok) {
             encos::wasm::SetError(WasmErrorCode::kNotFound, "Invalid joint handle");
             return encos::wasm::ToInt(WasmErrorCode::kNotFound);
         }
-        *out_ok = entry->joint->SetZero() ? 1 : 0;
+        *out_ok = entry->joint->HasBrake() ? 1 : 0;
         encos::wasm::SetOk();
         return encos::wasm::ToInt(WasmErrorCode::kOk);
     } catch (...) {
-        return encos::wasm::CatchException("joint_sdk_joint_set_zero");
+        return encos::wasm::CatchException("joint_sdk_joint_has_brake");
     }
 }
 
 EMSCRIPTEN_KEEPALIVE
-int joint_sdk_joint_goto_limit(std::uint32_t joint, int dir, float speed, float current,
-                               int timeout_ms, float* out_offset) {
-    try {
-        if (encos::wasm::RequirePointer(out_offset, "out_offset") != 0) {
-            return encos::wasm::ToInt(WasmErrorCode::kInvalidArgument);
-        }
-        auto* entry = RuntimeStore::Instance().GetJoint(joint);
-        if (!entry) {
-            encos::wasm::SetError(WasmErrorCode::kNotFound, "Invalid joint handle");
-            return encos::wasm::ToInt(WasmErrorCode::kNotFound);
-        }
-        *out_offset =
-            entry->joint->GotoLimit(dir, speed, current, std::chrono::milliseconds(timeout_ms));
-        encos::wasm::SetOk();
-        return encos::wasm::ToInt(WasmErrorCode::kOk);
-    } catch (...) {
-        return encos::wasm::CatchException("joint_sdk_joint_goto_limit");
-    }
-}
-
-EMSCRIPTEN_KEEPALIVE
-int joint_sdk_joint_goto_zero(std::uint32_t joint, float offset, float speed, float current,
-                              int timeout_ms, int* out_ok) {
+int joint_sdk_joint_brake(std::uint32_t joint, int enabled, int* out_ok) {
     try {
         if (encos::wasm::RequirePointer(out_ok, "out_ok") != 0) {
             return encos::wasm::ToInt(WasmErrorCode::kInvalidArgument);
@@ -670,14 +653,30 @@ int joint_sdk_joint_goto_zero(std::uint32_t joint, float offset, float speed, fl
             encos::wasm::SetError(WasmErrorCode::kNotFound, "Invalid joint handle");
             return encos::wasm::ToInt(WasmErrorCode::kNotFound);
         }
-        *out_ok =
-            entry->joint->GotoZero(offset, speed, current, std::chrono::milliseconds(timeout_ms))
-                ? 1
-                : 0;
+        *out_ok = entry->joint->Brake(enabled != 0) ? 1 : 0;
         encos::wasm::SetOk();
         return encos::wasm::ToInt(WasmErrorCode::kOk);
     } catch (...) {
-        return encos::wasm::CatchException("joint_sdk_joint_goto_zero");
+        return encos::wasm::CatchException("joint_sdk_joint_brake");
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
+int joint_sdk_joint_get_brake_status(std::uint32_t joint, int* out_ok) {
+    try {
+        if (encos::wasm::RequirePointer(out_ok, "out_ok") != 0) {
+            return encos::wasm::ToInt(WasmErrorCode::kInvalidArgument);
+        }
+        auto* entry = RuntimeStore::Instance().GetJoint(joint);
+        if (!entry) {
+            encos::wasm::SetError(WasmErrorCode::kNotFound, "Invalid joint handle");
+            return encos::wasm::ToInt(WasmErrorCode::kNotFound);
+        }
+        *out_ok = entry->joint->GetBrakeStatus() ? 1 : 0;
+        encos::wasm::SetOk();
+        return encos::wasm::ToInt(WasmErrorCode::kOk);
+    } catch (...) {
+        return encos::wasm::CatchException("joint_sdk_joint_get_brake_status");
     }
 }
 
@@ -697,28 +696,6 @@ int joint_sdk_joint_pos_as_offset(std::uint32_t joint, int dir, float* out_offse
         return encos::wasm::ToInt(WasmErrorCode::kOk);
     } catch (...) {
         return encos::wasm::CatchException("joint_sdk_joint_pos_as_offset");
-    }
-}
-
-EMSCRIPTEN_KEEPALIVE
-int joint_sdk_joint_calibrate(std::uint32_t joint, int dir, float speed, float current,
-                              int timeout_ms, int* out_ok) {
-    try {
-        if (encos::wasm::RequirePointer(out_ok, "out_ok") != 0) {
-            return encos::wasm::ToInt(WasmErrorCode::kInvalidArgument);
-        }
-        auto* entry = RuntimeStore::Instance().GetJoint(joint);
-        if (!entry) {
-            encos::wasm::SetError(WasmErrorCode::kNotFound, "Invalid joint handle");
-            return encos::wasm::ToInt(WasmErrorCode::kNotFound);
-        }
-        *out_ok =
-            entry->joint->Calibrate(dir, speed, current, std::chrono::milliseconds(timeout_ms)) ? 1
-                                                                                                : 0;
-        encos::wasm::SetOk();
-        return encos::wasm::ToInt(WasmErrorCode::kOk);
-    } catch (...) {
-        return encos::wasm::CatchException("joint_sdk_joint_calibrate");
     }
 }
 

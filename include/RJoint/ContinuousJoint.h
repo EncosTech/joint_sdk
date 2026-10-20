@@ -57,7 +57,7 @@ public:
         if (!motor_) {
             throw std::invalid_argument("ContinuousJoint motor must not be null");
         }
-        const auto ranges = motor_->GetPVTRanges();
+        const auto ranges = motor_->GetProperties();
         if (!std::isfinite(ranges.kt) || ranges.kt <= 0.0f) {
             throw std::invalid_argument("ContinuousJoint motor kt must be positive");
         }
@@ -83,6 +83,7 @@ public:
     void PVTControl([[maybe_unused]] float kp, [[maybe_unused]] float kd,
                     [[maybe_unused]] float pos, [[maybe_unused]] float spd,
                     [[maybe_unused]] float torque) override {
+        RecordPVTCommandForLog(kp, kd, pos, spd, torque, PVTControlMode::MotorPVT);
         ThrowUnsupported("PVTControl");
     }
 
@@ -90,12 +91,14 @@ public:
                     [[maybe_unused]] float pos, [[maybe_unused]] float spd,
                     [[maybe_unused]] float torque,
                     [[maybe_unused]] PVTControlMode torque_mode) override {
+        RecordPVTCommandForLog(kp, kd, pos, spd, torque, torque_mode);
         ThrowUnsupported("PVTControl");
     }
 
     void PosControl([[maybe_unused]] float position, [[maybe_unused]] float speed = 0,
                     [[maybe_unused]] float current = 0,
                     [[maybe_unused]] int feedback = 1) override {
+        RecordPosCommandForLog(position, speed, current, feedback);
         ThrowUnsupported("PosControl");
     }
 
@@ -103,6 +106,7 @@ public:
      * @brief 执行不带位置限位保护的速度控制。
      */
     void SpdControl(float speed, float current = 0, int feedback = 1) override {
+        RecordSpdCommandForLog(speed, current, feedback);
         RejectNonFiniteControlInput("SpdControl", speed, current);
         if (reverse_) {
             speed = -speed;
@@ -119,6 +123,7 @@ public:
      * @brief 执行不带位置限位保护的电流控制。
      */
     void CurControl(float current = 0, int feedback = 1) override {
+        RecordCurCommandForLog(current, feedback);
         RejectNonFiniteControlInput("CurControl", current);
         if (reverse_) {
             current = -current;
@@ -131,6 +136,7 @@ public:
      * @brief 执行不带位置限位保护的扭矩控制。
      */
     void TorControl(float torque = 0, int feedback = 1) override {
+        RecordTorCommandForLog(torque, feedback);
         RejectNonFiniteControlInput("TorControl", torque);
         if (reverse_) {
             torque = -torque;
@@ -139,7 +145,33 @@ public:
         motor_->TorControl<0>(torque, feedback);
     }
 
+    /** @brief 查询底层电机是否带机械抱闸。 */
+    bool HasBrake() const override {
+        return motor_->HasBrake();
+    }
+
+    /** @brief 控制机械抱闸：true 抱紧，false 释放，返回驱动操作结果。 */
+    bool Brake(bool enabled) override {
+        RecordBrakeCommandForLog(enabled);
+        if (!HasBrake()) {
+            WarnProtection("Brake", "The current joint does not use brake-equipped motors");
+            return false;
+        }
+        return motor_->Brake(enabled);
+    }
+
+    /** @brief 查询机械抱闸状态；协议值 0 表示抱紧，1 表示释放。 */
+    bool GetBrakeStatus() override {
+        if (!HasBrake()) {
+            WarnProtection("GetBrakeStatus",
+                           "The current joint does not use brake-equipped motors");
+            return false;
+        }
+        return motor_->GetParameter<MotorParameter::BrakeStatus>() == 0;
+    }
+
     void Stop(MotorStopMode mode, float current = 0, int feedback = 1) override {
+        RecordStopCommandForLog(mode, current, feedback);
         const bool finite_current = std::isfinite(current);
         LogProtection("Stop", "non-finite current; using zero", !finite_current);
         if (!finite_current) {
@@ -148,41 +180,12 @@ public:
         motor_->Stop<0>(mode, current, feedback);
     }
 
-    bool SetZero() override {
-        const bool result = motor_->ResetZeroPos();
-        if (result) {
-            ResetPositionState();
-        }
-        return result;
-    }
-
     void SetLimit([[maybe_unused]] Range<float> limit) override {
         ThrowUnsupported("SetLimit");
     }
 
-    float GotoLimit([[maybe_unused]] int dir, [[maybe_unused]] float spd = 2.0f,
-                    [[maybe_unused]] float cur = 2.0f,
-                    [[maybe_unused]] std::chrono::milliseconds timeout = std::chrono::milliseconds{
-                        5000}) override {
-        ThrowUnsupported("GotoLimit");
-    }
-
-    bool GotoZero([[maybe_unused]] float offset, [[maybe_unused]] float spd = 2.0f,
-                  [[maybe_unused]] float cur = 2.0f,
-                  [[maybe_unused]] std::chrono::milliseconds timeout = std::chrono::milliseconds{
-                      5000}) override {
-        ThrowUnsupported("GotoZero");
-    }
-
     float PosAsOffset([[maybe_unused]] int dir) override {
         ThrowUnsupported("PosAsOffset");
-    }
-
-    bool Calibrate([[maybe_unused]] int dir, [[maybe_unused]] float spd = 2.0f,
-                   [[maybe_unused]] float cur = 2.0f,
-                   [[maybe_unused]] std::chrono::milliseconds timeout = std::chrono::milliseconds{
-                       5000}) override {
-        ThrowUnsupported("Calibrate");
     }
 
     /**
@@ -206,18 +209,13 @@ public:
         std::optional<JointStatus> joint_status;
         {
             std::lock_guard<std::mutex> lock(position_state_->mutex);
-            if (!position_state_->awaiting_fresh_feedback) {
-                if (position_state_->latest_status) {
-                    joint_status = position_state_->latest_status;
-                } else {
-                    joint_status = MakeJointStatusLocked(*status, *position_state_,
-                                                         motor_->GetPVTRanges().kt, reverse_);
-                    position_state_->latest_status = joint_status;
-                }
+            if (position_state_->latest_status) {
+                joint_status = position_state_->latest_status;
+            } else {
+                joint_status = MakeJointStatusLocked(*status, *position_state_,
+                                                     motor_->GetProperties().kt, reverse_);
+                position_state_->latest_status = joint_status;
             }
-        }
-        if (!joint_status && autoSendCommand) {
-            motor_->PVTControl<0>(0, 1, 0, 0, 0);
         }
         return joint_status;
     }
@@ -236,7 +234,6 @@ private:
         double last_raw{0.0};
         double continuous{0.0};
         bool initialized{false};
-        bool awaiting_fresh_feedback{false};
         std::optional<JointStatus> latest_status;
         std::function<void(const JointStatus&)> on_status;
     };
@@ -297,29 +294,21 @@ private:
     void InstallStatusDispatcher(float kt) {
         auto state = position_state_;
         const bool reverse = reverse_;
-        motor_->SetOnStatus([state = std::move(state), kt, reverse](const MotorStatus& status) {
-            JointStatus joint_status{};
-            std::function<void(const JointStatus&)> on_status;
-            {
-                std::lock_guard<std::mutex> lock(state->mutex);
-                state->awaiting_fresh_feedback = false;
-                joint_status = MakeJointStatusLocked(status, *state, kt, reverse);
-                state->latest_status = joint_status;
-                on_status = state->on_status;
-            }
-            if (on_status) {
-                on_status(joint_status);
-            }
-        });
-    }
-
-    void ResetPositionState() {
-        std::lock_guard<std::mutex> lock(position_state_->mutex);
-        position_state_->last_raw = 0.0;
-        position_state_->continuous = 0.0;
-        position_state_->initialized = false;
-        position_state_->awaiting_fresh_feedback = true;
-        position_state_->latest_status.reset();
+        motor_->SetOnStatus(
+            [this, state = std::move(state), kt, reverse](const MotorStatus& status) {
+                JointStatus joint_status{};
+                std::function<void(const JointStatus&)> on_status;
+                {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    joint_status = MakeJointStatusLocked(status, *state, kt, reverse);
+                    state->latest_status = joint_status;
+                    on_status = state->on_status;
+                }
+                RecordStatusForLog(joint_status);
+                if (on_status) {
+                    on_status(joint_status);
+                }
+            });
     }
 
     Motor* motor_{nullptr};  ///< Bus-owned, non-owning motor instance

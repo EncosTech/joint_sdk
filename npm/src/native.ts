@@ -41,6 +41,7 @@ export interface NativeApi {
     adapterName: string,
     loggerName: string,
     logLevel: number,
+    extendJson?: string,
   ): void
   managerCreateAdapterJson(manager: number, adapterJson: string): void
   disposeManager(manager: number): void
@@ -68,11 +69,10 @@ export interface NativeApi {
   jointCurControl(joint: number, current: number, feedback: number): Promise<void>
   jointTorControl(joint: number, torque: number, feedback: number): Promise<void>
   jointStop(joint: number, mode: number, current: number, feedback: number): Promise<void>
-  jointSetZero(joint: number): Promise<boolean>
-  jointGotoLimit(joint: number, dir: number, speed: number, current: number, timeoutMs: number): Promise<number>
-  jointGotoZero(joint: number, offset: number, speed: number, current: number, timeoutMs: number): Promise<boolean>
+  jointHasBrake(joint: number): boolean
+  jointBrake(joint: number, enabled: boolean): Promise<boolean>
+  jointGetBrakeStatus(joint: number): Promise<boolean>
   jointPosAsOffset(joint: number, dir: number): number
-  jointCalibrate(joint: number, dir: number, speed: number, current: number, timeoutMs: number): Promise<boolean>
   jointGetStatusJson(joint: number, autoSend: boolean, lifeCycleDeduction: number): string
   jointSetLimit(joint: number, min: number, max: number): void
   jointSetStatusCallback(joint: number, callback: ((json: string) => void) | null): void
@@ -205,12 +205,14 @@ export function createNativeApi(module: WasmModule): NativeApi {
     'string',
     'string',
     'number',
+    'string',
   ]) as (
     manager: number,
     adapterType: string,
     adapterName: string,
     loggerName: string,
     logLevel: number,
+    extendJson: string,
   ) => number
   const managerCreateAdapterJsonFn = wrap(
     'joint_sdk_manager_create_adapter_json',
@@ -317,38 +319,17 @@ export function createNativeApi(module: WasmModule): NativeApi {
     'number',
     'number',
   ], true) as (joint: number, mode: number, current: number, feedback: number) => Promise<number>
-  const jointSetZeroFn = wrap('joint_sdk_joint_set_zero', 'number', ['number', 'number'], true) as (
+  const jointHasBrakeFn = wrap('joint_sdk_joint_has_brake', 'number', ['number', 'number']) as (
     joint: number,
     outOk: number,
-  ) => Promise<number>
-  const jointGotoLimitFn = wrap('joint_sdk_joint_goto_limit', 'number', [
-    'number',
-    'number',
-    'number',
-    'number',
-    'number',
-    'number',
-  ], true) as (
+  ) => number
+  const jointBrakeFn = wrap('joint_sdk_joint_brake', 'number', ['number', 'number', 'number'], true) as (
     joint: number,
-    dir: number,
-    speed: number,
-    current: number,
-    timeoutMs: number,
-    outOffset: number,
+    enabled: number,
+    outOk: number,
   ) => Promise<number>
-  const jointGotoZeroFn = wrap('joint_sdk_joint_goto_zero', 'number', [
-    'number',
-    'number',
-    'number',
-    'number',
-    'number',
-    'number',
-  ], true) as (
+  const jointGetBrakeStatusFn = wrap('joint_sdk_joint_get_brake_status', 'number', ['number', 'number'], true) as (
     joint: number,
-    offset: number,
-    speed: number,
-    current: number,
-    timeoutMs: number,
     outOk: number,
   ) => Promise<number>
   const jointPosAsOffsetFn = wrap('joint_sdk_joint_pos_as_offset', 'number', [
@@ -356,21 +337,6 @@ export function createNativeApi(module: WasmModule): NativeApi {
     'number',
     'number',
   ]) as (joint: number, dir: number, outOffset: number) => number
-  const jointCalibrateFn = wrap('joint_sdk_joint_calibrate', 'number', [
-    'number',
-    'number',
-    'number',
-    'number',
-    'number',
-    'number',
-  ], true) as (
-    joint: number,
-    dir: number,
-    speed: number,
-    current: number,
-    timeoutMs: number,
-    outOk: number,
-  ) => Promise<number>
   const jointGetStatusJsonFn = wrap('joint_sdk_joint_get_status_json', 'number', [
     'number',
     'number',
@@ -531,9 +497,23 @@ export function createNativeApi(module: WasmModule): NativeApi {
       }
     },
 
-    managerCreateAdapter(manager, adapterType, adapterName, loggerName, logLevel): void {
+    managerCreateAdapter(
+      manager,
+      adapterType,
+      adapterName,
+      loggerName,
+      logLevel,
+      extendJson = '',
+    ): void {
       throwOnError(
-        managerCreateAdapterFn(manager, adapterType, adapterName, loggerName, logLevel),
+        managerCreateAdapterFn(
+          manager,
+          adapterType,
+          adapterName,
+          loggerName,
+          logLevel,
+          extendJson,
+        ),
         'managerCreateAdapter',
       )
     },
@@ -641,36 +621,31 @@ export function createNativeApi(module: WasmModule): NativeApi {
       throwOnError(await jointStopFn(joint, mode, current, feedback), 'jointStop')
     },
 
-    async jointSetZero(joint): Promise<boolean> {
+
+    jointHasBrake(joint): boolean {
       const outPtr = allocInt32(module)
       try {
-        throwOnError(await jointSetZeroFn(joint, outPtr), 'jointSetZero')
+        throwOnError(jointHasBrakeFn(joint, outPtr), 'jointHasBrake')
         return readInt32(module, outPtr) !== 0
       } finally {
         module._free(outPtr)
       }
     },
 
-    async jointGotoLimit(joint, dir, speed, current, timeoutMs): Promise<number> {
-      const outPtr = allocFloat(module)
+    async jointBrake(joint, enabled): Promise<boolean> {
+      const outPtr = allocInt32(module)
       try {
-        throwOnError(
-          await jointGotoLimitFn(joint, dir, speed, current, timeoutMs, outPtr),
-          'jointGotoLimit',
-        )
-        return readFloat(module, outPtr)
+        throwOnError(await jointBrakeFn(joint, enabled ? 1 : 0, outPtr), 'jointBrake')
+        return readInt32(module, outPtr) !== 0
       } finally {
         module._free(outPtr)
       }
     },
 
-    async jointGotoZero(joint, offset, speed, current, timeoutMs): Promise<boolean> {
+    async jointGetBrakeStatus(joint): Promise<boolean> {
       const outPtr = allocInt32(module)
       try {
-        throwOnError(
-          await jointGotoZeroFn(joint, offset, speed, current, timeoutMs, outPtr),
-          'jointGotoZero',
-        )
+        throwOnError(await jointGetBrakeStatusFn(joint, outPtr), 'jointGetBrakeStatus')
         return readInt32(module, outPtr) !== 0
       } finally {
         module._free(outPtr)
@@ -682,19 +657,6 @@ export function createNativeApi(module: WasmModule): NativeApi {
       try {
         throwOnError(jointPosAsOffsetFn(joint, dir, outPtr), 'jointPosAsOffset')
         return readFloat(module, outPtr)
-      } finally {
-        module._free(outPtr)
-      }
-    },
-
-    async jointCalibrate(joint, dir, speed, current, timeoutMs): Promise<boolean> {
-      const outPtr = allocInt32(module)
-      try {
-        throwOnError(
-          await jointCalibrateFn(joint, dir, speed, current, timeoutMs, outPtr),
-          'jointCalibrate',
-        )
-        return readInt32(module, outPtr) !== 0
       } finally {
         module._free(outPtr)
       }

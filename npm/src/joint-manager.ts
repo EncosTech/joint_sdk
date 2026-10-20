@@ -93,13 +93,13 @@ export class JointManagerWrapper {
   async createAdapter(
     adapterType: string,
     adapterName: string,
-    options?: { loggerName?: string; logLevel?: number },
+    options?: { loggerName?: string; logLevel?: number; extend?: Record<string, unknown> },
   ): Promise<string>
   async createAdapter(definition: AdapterDefinition | string): Promise<string>
   async createAdapter(
     adapterTypeOrDefinition: string | AdapterDefinition,
     adapterName?: string,
-    options?: { loggerName?: string; logLevel?: number },
+    options?: { loggerName?: string; logLevel?: number; extend?: Record<string, unknown> },
   ): Promise<string> {
     // 对象/JSON 形态的适配器配置先归一成 (type, name)，复用下方的创建流程
     if (typeof adapterTypeOrDefinition !== 'string' || adapterName === undefined) {
@@ -113,6 +113,7 @@ export class JointManagerWrapper {
       return this.createAdapter(definition.type, definition.name, {
         loggerName: definition.loggerName,
         logLevel: definition.logLevel,
+        extend: definition.extend,
       })
     }
     const adapterType = adapterTypeOrDefinition
@@ -128,6 +129,7 @@ export class JointManagerWrapper {
         interfaceName,
         options?.loggerName ?? interfaceName,
         options?.logLevel ?? LogLevel.Info,
+        options?.extend === undefined ? '' : JSON.stringify(options.extend),
       )
     } catch (error) {
       if (adapterType === 'RelayWs' && this.runtime) {

@@ -12,6 +12,7 @@
 - [测试](#测试)
 - [Motor 文件日志](#motor-文件日志)
 - [关节保护与告警](#关节保护与告警)
+- [关节机械抱闸](#关节机械抱闸)
 - [ContinuousJoint 连续关节](#continuousjoint-连续关节)
 - [RJoint 零阻尼控制](#rjoint-零阻尼控制)
 - [JSON 配置创建](#json-配置创建)
@@ -31,7 +32,7 @@
 sudo apt update
 sudo apt install -y \
   build-essential cmake git ninja-build pkg-config \
-  libeigen3-dev nlohmann-json3-dev \
+  libeigen3-dev \
   libcap-dev libcap2-bin libzstd-dev libspdlog-dev libfmt-dev
 
 git clone --recurse-submodules \
@@ -40,7 +41,7 @@ cd joint_sdk
 git submodule update --init --recursive
 ```
 
-原生 joint_sdk 通过 CMake 查找已安装的 `encos_driver >= 3.3.2`。如果机器上尚未安装，
+原生 joint_sdk 通过 CMake 查找已安装的 `encos_driver >= 4.0.0`。如果机器上尚未安装，
 先从源码安装到与 joint_sdk 相同的前缀：
 
 ```bash
@@ -112,19 +113,33 @@ manager.DisableLog();  // 刷新并关闭全部日志
 ```
 
 单 Adapter Manager 使用 `s<slaveId>b<busId>m<motorId>` 作为文件基础名；多 Adapter
-Manager 增加 `<adapterName>_` 前缀。driver 会为每台 Motor 生成对应的
+Manager 增加适配器身份前缀：索引引用为 `index:<id>`，名称引用为
+`name:<名称字节数>:<名称>`，随后接 `_`。前缀中的非安全字符按 `%HH` 转义，
+例如索引 `0` 使用 `index%3A0_`，名称 `"0"` 使用 `name%3A1%3A0_`，避免日志重名。
+driver 会为每台 Motor 生成对应的
 `_status.csv.zstd` 与 `_command.csv.zstd` 文件。日志启用期间新增的关节电机也会自动记录，
 可通过 `manager.IsLogged()` 查询整体状态。Adapter 名中的路径分隔符等非文件名安全字符会
-使用 `%HH` 转义。该文件日志能力不适用于 WASM。
+使用 `%HH` 转义。目录还会按关节生成 `<jointName>_command.csv.zstd` 和
+`<jointName>_status.csv.zstd`，文件名中的非安全字符按 `%HH` 转义；所有关节的
+`WarnProtection`/保护进入事件统一写入 `joint_protection.csv.zstd`。该文件日志能力不适用于 WASM。
 
 ## 关节保护与告警
 
 控制期间必须连续调用控制命令，建议控制频率 **≥500 Hz**（周期 ≤2 ms）。
 耦合关节的**所有控制模式**（`PVTControl`、`PosControl`、`SpdControl`、`TorControl`、
 `CurControl`）都按合帧下发：每个周期应完成主、从两轴各一次调用，第一条调用只缓存该轴
-目标，第二条调用把两轴目标一起做联合映射后一次下发两台电机。半帧期间不产生任何电机
-命令；反馈刷新与限位、奇异方向保护在连续调用中持续生效，单次调用不能持续执行这些判断。
-结束控制时显式调用 `Stop`；停止会取消尚未发出的半帧并清空两轴目标缓存，后续控制从新批次开始。
+目标，第二条调用把两轴目标一起求解、检查并下发两台电机。同一轴连续调用两次也会完成
+批次。合法的首条命令不产生电机命令，也不修改已提交的位置目标或增益；非法输入立即
+拒绝并进入保护。反馈刷新与限位、奇异方向保护依赖连续调用，单次调用不能持续执行这些判断。
+结束控制时显式调用 `Stop`；停止会取消半帧并清空记住的轴控制量，后续控制从新批次开始。
+未完成或被拒绝的候选目标不会留给后续批次。动态模式仍允许实际反馈刷新基准位姿，
+该刷新不提交半帧中的任何控制目标。
+
+耦合关节入口要求所有数值有限、增益非负、速度/电流上限非负，`feedback` 为 0–3。
+速度目标须满足 `maxSpd`，扭矩目标须满足 `maxTor`；位置模式的关节目标须在两侧内缩
+2° 的限位范围内。输入越界抛出 `std::invalid_argument`，不再静默截断；位置模式
+`speed=0` 使用该轴最大速度，位置/速度模式 `current=0` 保留底层默认含义。
+显式电流上限还须满足各电机对应的 `maxTor / kt` 和电机电流范围。
 
 `JointManager` 创建的所有关节（`RJoint`、`ContinuousJoint`、耦合主从轴）共用
 `manager.GetLogger()` 记录保护日志，包含关节名称、控制模式和原因；数值限幅还记录
@@ -139,8 +154,8 @@ Manager 增加 `<adapterName>_` 前缀。driver 会为每台 Motor 生成对应�
 日志中用 `scope` 字段区分。会抛出异常的一次性故障（非法输入、不支持的操作、逆解失败等）
 仍逐次输出 warning，因为异常已经终止了该条控制流。
 
-保护位控与普通位控复用位置下发逻辑：`RJoint` 调用自身 `PosControl`；耦合关节复用
-双电机位置下发函数，避免重新进入双轴合帧与死点检测。电机保持目标限制在软件限位
+保护位控中 `RJoint` 调用自身 `PosControl`；耦合关节由一个保护入口直接计算并下发
+保持命令，避免重新进入双轴合帧与死点检测。电机保持目标限制在软件限位
 两侧各内缩 2° 的区间；若区间为空或无法保持，则回退 `FullBrake` 并告警。
 耦合电机保持目标限幅后会重新验证闭链位姿及两个虚拟关节限位，验证失败时也回退
 `FullBrake`。旋转关节在控制前读取位置反馈抛出异常时，先尝试 `FullBrake`，再传播原始异常。
@@ -153,18 +168,26 @@ Manager 增加 `<adapterName>_` 前缀。driver 会为每台 Motor 生成对应�
 | 值 | 枚举成员 | 控制方式 |
 | --- | --- | --- |
 | 0 | `MotorPVT` | 将关节目标及增益映射到双电机，直接下发电机 PVT |
-| 1 | `HostTorque` | 上位机计算 `Kp * 位置误差 + Kd * 速度误差 + 前馈扭矩`，按关节 `maxTor` 限幅后映射并下发电机 `TorControl` |
-| 2 | `HostKpMotorKd` | 上位机计算 `Kp * 位置误差 + 前馈扭矩`；映射后的 Kd 与速度目标下发电机 PVT，本地执行速度闭环，电机 `Kp=0` |
+| 1 | `HostTorque` | 上位机计算 `Kp * 位置误差 + Kd * 速度误差 + 前馈扭矩`，验证关节 `maxTor` 后映射并下发电机 `TorControl` |
+| 2 | `HostKpMotorKd` | 上位机计算 `Kp * 位置误差 + 前馈扭矩`；电机 `Kp=0`，按完整关节 Kd 阻尼力矩反算目标速度，补偿交叉耦合项后下发电机 PVT |
 
-模式 1、2 通过当前反馈位姿的 `Jᵀ` 映射力矩，并按电机扭矩范围统一缩放。
-模式 2 的 `Kd` 使用 `diag(Jᵀ Kd J)` 对角近似，SDK 不重复计算速度误差；
+模式 1、2 通过同一份实际反馈快照计算并映射力矩，计算出的关节总力矩超过 `maxTor`
+时拒绝整帧并保护，抛出 `JointException`。映射函数只做数学转换，不再同比缩放双电机输出。
+模式 0、2 的电机增益、速度和力矩协议限幅交给底层 `Motor::PVTControl`；饱和时两台
+电机独立限幅，不保证保持原来的耦合速度/力矩比例。模式 1 的 `TorControl` 没有相同的
+驱动限幅，故在任一电机发送前检查两台电机的输出范围和协议可编码性，越界拒绝整帧。
+PVT 目标位置仍须逆解成功且位于电机协议位置范围；关节/电机软件限位按实际位置和运动
+方向保护，实际位姿安全时允许目标超出软件位置限位。
+模式 2 的电机 `Kd` 使用 `diag(Jᵀ Kd J)`，并根据实际速度反馈调整目标速度，使电机阻尼
+力矩匹配完整关节阻尼力矩，包含交叉耦合项。补偿后的目标速度超出电机协议范围时，
+拒绝整帧并保护，抛出 `JointException`。
 这里 `J` 满足 `关节速度 = J * 电机速度`。
 模式 0、2 将正的映射 `Kd` 下限设为 0.1，再受电机协议范围限制；显式零阻尼仍为零。
 同一合帧批次的两轴必须选择相同的上位机模式才生效；模式不一致时回退普通电机 PVT。
 `SpdControl`/`TorControl`/`CurControl` 三种动态模式也按批次下发，同一批次的两条调用必须
 使用同一种模式；模式不一致或中途切换到 `PVTControl`/`PosControl` 时，挂起的半帧被丢弃，
 本次调用作为新批次的第一条处理。
-模式 1 需要有效位置和速度反馈，模式 2 需要有效位置反馈；反馈不可用时沿用普通 PVT 回退。
+模式 1、2 均需要有效位置和速度反馈；反馈不可用时沿用普通 PVT 回退。
 
 ```cpp
 roll->PVTControl(kp_roll, kd_roll, pos_roll, spd_roll, tor_roll,
@@ -177,20 +200,69 @@ TypeScript 从包入口导入 `PVTControlMode`，通过 `pvtControl` 第六个�
 导出的 `PVTControlCommand.torqueMode` 类型也同步为该枚举。
 这是接口变更：旧 `false` 迁移为 `MotorPVT`（0），旧 `true` 迁移为 `HostKpMotorKd`（2），
 不能把旧 `true` 转成数值 1；WASM C ABI 的整型参数也按新的 0/1/2 语义解释。
-非法枚举值会被拒绝。普通 `RJoint` 的三种合法模式均沿用自身 PVT；`ContinuousJoint` 仍不支持 PVT。
+本次调整将原模式 3 的完整耦合阻尼实现迁移至 `HostKpMotorKd`（2），删除原模式 2 的
+对角近似控制路径以及模式 4、5。原先使用模式 2 的调用自动采用新行为；原模式 3 调用需
+改为 `HostKpMotorKd` / 2。数值 3、4、5 和其他非法枚举值均被拒绝，不提供旧名称别名。
+普通 `RJoint` 的三种合法模式均沿用自身 PVT；`ContinuousJoint` 仍不支持 PVT。
 
 耦合 `PosControl` 合帧保存两轴的位置、速度及电流约束：按整批位移和两轴速度上限计算共同
 运动时间，再映射电机速度；两个电机分别采用两次调用中较小的电流上限。
 由于电机接收的是独立速度上限，SDK 还按目标位姿的速度映射限制两轴最坏组合速度，
 实际下发速度可能比共同运动时间计算值更低。
 
+C++ 从轴控制统一通过从轴的 `BaseJoint`/`SlaveJoint` 接口调用；原先供代理使用的
+`MasterJoint::*ForSlave` 转发接口已移除。
+
 耦合 `SpdControl`/`TorControl` 合帧后在最后有效位姿一次性执行双轴逆速度和逆力矩映射，
 两轴动态量同时保留（不会出现后一次调用覆盖前一次轴分量的情况）；`CurControl` 按当前传动
-关系把两轴电流换算为被控轴扭矩，按各轴 `maxTor` 限幅后再按力矩比对双电机做电流分配，
-并按电机电流范围统一缩放。两种调用的电机电流上限取较小值，`feedback` 取第二条调用。
-未在本批次命令过的轴沿用该轴上次命令值（从未命令过则为 0），`Stop`、`SetZero` 以及保护拦截
-（位姿不可执行或朝奇异区运动）会清空这些缓存。两轴都朝越限方向或朝奇异区运动时，拦截轴自身的命令置零，另一轴仍按本批次目标参与映射；
-电机级越限则两台电机一起置零。
+关系把两轴电流换算为被控轴扭矩，验证各轴 `maxTor` 后按力矩比对双电机做电流分配。
+这些模式不再同比缩放电机输出：下发前验证完整输出的有限值、电机范围与协议可编码性，
+超出范围抛出 `JointException` 并进入保护。两次调用的电机电流上限取较小值，`feedback` 取第二条调用。
+未在本批次命令过的轴沿用该轴上次命令值（从未命令过则为 0），`Stop` 以及保护拦截
+（位姿不可执行或朝奇异区运动）会清空这些动态缓存。关节级越限将该轴命令置零，另一轴
+仍参与映射；朝奇异区运动则整帧进入位置保持，电机级越限将两台电机命令一起置零。
+
+关节层不提供电机零点重置接口，控制与反馈均使用电机已有坐标系。
+
+## 关节机械抱闸
+
+普通旋转关节、连续关节及双电机主从关节提供以下接口；零阻尼关节暂不支持抱闸，使用基类默认行为。
+
+| C++ | JavaScript | 含义 |
+| --- | --- | --- |
+| `HasBrake()` | `hasBrake(): boolean` | 查询是否带机械抱闸；双电机必须两台都支持 |
+| `Brake(bool enabled)` | `brake(enabled: boolean): Promise<boolean>` | 控制整个关节抱闸：`true` 抱紧，`false` 释放 |
+| `GetBrakeStatus()` | `getBrakeStatus(): Promise<boolean>` | 查询当前是否抱紧，并补齐双电机不一致的抱闸状态 |
+
+启动、释放和状态查询内部都会先调用 `HasBrake()`，调用方不必手动预检。不支持时输出包含关节名称的
+“The current joint does not use brake-equipped motors”告警，返回 `false`，不发送抱闸或状态查询命令。
+
+启动与释放直接使用驱动 `Motor::Brake()` 的结果。双电机无论从主关节还是从关节调用，都会分别操作两台电机；
+只有两台都返回成功才返回 `true`，第一台返回失败也会继续调用第二台，不执行回滚或额外状态复核。
+这是一次关节调用内的双电机操作，不保证两台电机在同一物理时刻动作。
+
+状态查询将驱动协议值 `0` 转为抱紧、`1` 转为释放。两台都释放时返回 `false`，任一台抱紧时返回 `true`；
+如果仅一台抱紧，会对另一台调用 `Brake(true)`。补抱闸返回失败时告警，但查询仍返回 `true`。
+查询可能阻塞并发送补抱闸命令。通信异常沿用驱动行为，通过 C++ 异常或 JS Promise rejection 传递。
+
+抱闸能力以驱动 `Motor::HasBrake()` 为准；当前驱动型号表的 `brake` 均为 `false`，实际型号启用需由驱动补齐标记。
+硬件带抱闸也不代表固件支持控制：驱动对于不支持抱闸命令的固件会直接返回失败。
+机械抱闸与 `Stop(MotorStopMode::FullBrake)` 的电气制动是不同操作。
+
+```cpp
+auto joint = manager.GetJoint("joint1");
+const bool supported = joint->HasBrake();
+const bool engaged = joint->Brake(true);
+const bool brake_status = joint->GetBrakeStatus();
+const bool released = joint->Brake(false);
+```
+
+```typescript
+const supported = joint.hasBrake()
+const engaged = await joint.brake(true)
+const brakeStatus = await joint.getBrakeStatus()
+const released = await joint.brake(false)
+```
 
 ## ContinuousJoint 连续关节
 
@@ -199,9 +271,8 @@ TypeScript 从包入口导入 `PVTControlMode`，通过 `pvtControl` 第六个�
 `PosControl`、`PVTControl`、`SetLimit` 以及限位/校准相关接口会抛出
 `kContinuousJointUnsupportedOperation`。
 
-连续关节会使用 `Motor::GetPVTRanges().position` 的跨度展开反馈位置。当编码器反馈从上限
-跳到下限或反向跳变时，`GetStatus()` 与状态回调返回的 `pos` 会保持连续；成功执行
-`SetZero()` 后重新开始累计。
+连续关节会使用 `Motor::GetProperties().position` 的跨度展开反馈位置。当编码器反馈从上限
+跳到下限或反向跳变时，`GetStatus()` 与状态回调返回的 `pos` 会保持连续，位置累计从首个有效反馈开始。
 
 ```cpp
 encos::ContinuousJoint::Config config{};
@@ -253,6 +324,8 @@ RJoint 执行 `FullBrake`。
 关节自由运动，并确认标定文件中的最大补偿力矩适合对应关节。补偿统一通过电流模式下发。
 
 ## JSON 配置创建
+
+完整字段说明与离线校验方法见 [control.json 配置文档](doc/control-config.md)。
 
 `JointManager<JointTypes...>` 提供一个接收 JSON 的构造函数：先按 `adapters` 数组创建
 适配器，再按 `joints` 数组创建关节，两个数组都按给定顺序处理。默认构造保持不变。
@@ -402,8 +475,8 @@ runtime.dispose()
 ## 依赖
 
 - C++17
-- encos_driver >= 3.3.2（原生构建必须预先安装；使用 main/v3 的 `motor/` 头文件）
-- nlohmann/json（Ubuntu 包：`nlohmann-json3-dev`）
+- encos_driver >= 4.0.0（原生构建必须预先安装；4.0.0 起电机头文件位于 `device/motor/`）
+- nlohmann/json（使用 motor_driver 随包提供的 `external/json.hpp`，避免与系统版本混用导致 ABI 不一致）
 - Boost.Preprocessor（`external/boost_preprocessor/` 子模块）
 - couple_joint_solver（`external/couple_joint_solver/` 子模块）
 - GoogleTest、clang-format、clang-tidy（仅测试和代码检查需要）
@@ -431,4 +504,4 @@ tests/            # 测试代码
 
 项目自有源码采用 [MIT License](LICENSE)，第三方子模块和依赖保留原许可证。
 DEB 包包含完整 LICENSE 和 Debian copyright；npm 包声明 `license: MIT` 并包含完整 LICENSE。
-构建产物下载与 GitHub 发布配置见 [发布说明](doc/github-release.md)。
+GitHub 发布入口为 `scripts/publish-github-release.sh`，配置模板为 `scripts/.env.example`。

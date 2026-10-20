@@ -20,14 +20,14 @@
 #include <utility>
 #include <variant>
 
-#include <nlohmann/json.hpp>
-
+#include "JointLog.h"
 #include "JointSdkLog.h"
 #include "adapter/base_adapter.h"
 #include "bus/bus.h"
+#include "device/motor/motor.h"
+#include "device/motor/types.h"
 #include "encos_motor.h"
-#include "motor/motor.h"
-#include "motor/types.h"
+#include "external/json.hpp"
 
 namespace encos {
 
@@ -35,7 +35,7 @@ namespace encos {
 enum class PVTControlMode : int {
     MotorPVT = 0,       ///< 映射关节 PVT 后由电机执行位置与速度闭环。
     HostTorque = 1,     ///< 上位机计算 Kp、Kd 和前馈力矩，映射后下发 TorControl。
-    HostKpMotorKd = 2,  ///< 上位机计算 Kp 和前馈力矩，电机执行映射后的 Kd 闭环。
+    HostKpMotorKd = 2,  ///< 上位机 Kp，按完整关节 Kd 耦合修正电机目标速度。
 };
 
 constexpr bool IsValidPVTControlMode(PVTControlMode mode) {
@@ -62,7 +62,7 @@ struct MotorInitModel {
  * @brief 基于参数范围的电机初始化参数
  */
 struct MotorInitParams {
-    MotorPVTRanges ranges;  ///< PVT参数范围
+    MotorProperties ranges;  ///< 控制属性与范围
 };
 
 /**
@@ -97,8 +97,8 @@ struct MotorParams {
     /**
      * @brief 适配器引用的字符串形式
      *
-     * 索引形式转换为十进制字符串，名称形式原样返回。用于日志文件名、双电机配对键
-     * 等只需要稳定标识的场景。
+     * 索引形式转换为十进制字符串，名称形式原样返回。仅用于显示；身份比较使用
+     * AdapterIdentityKey()。
      * @return 适配器引用的字符串形式。
      */
     std::string AdapterIdString() const {
@@ -106,6 +106,15 @@ struct MotorParams {
             return std::to_string(*index);
         }
         return std::get<std::string>(adapterId);
+    }
+
+    /** @brief 保留引用类型的身份键；名称长度前缀避免拼接时的分隔符歧义。 */
+    std::string AdapterIdentityKey() const {
+        if (const auto* index = std::get_if<std::uint32_t>(&adapterId)) {
+            return "index:" + std::to_string(*index);
+        }
+        const auto& name = std::get<std::string>(adapterId);
+        return "name:" + std::to_string(name.size()) + ":" + name;
     }
 
     /**
@@ -197,7 +206,6 @@ struct JointStatus {
  *
  * - `GetStatus()` 返回的位置/速度/扭矩均为关节坐标系
  * - `PosControl`、`SpdControl`、`PVTControl` 等控制函数的输入均为关节坐标系
- * - `GotoLimit` 返回的偏置为关节坐标系，可直接传入 `GotoZero`
  */
 class BaseJoint {
 public:
@@ -249,6 +257,37 @@ public:
 
     const std::string& GetProtectionName() const {
         return protection_name_;
+    }
+
+    /** @brief 设置关节级 CSV 日志上下文；由 JointManager 调用。 */
+    virtual void SetJointLogContext(std::shared_ptr<JointLogContext> context, std::string name) {
+        if (context) {
+            context->RegisterJoint(name);
+        }
+        std::lock_guard<std::mutex> lock(joint_log_mutex_);
+        joint_log_context_ = std::move(context);
+        joint_log_name_ = std::move(name);
+    }
+
+    /** @brief 记录一条已转换到关节坐标系的反馈；供派生类状态分发器调用。 */
+    void RecordStatusForLog(const JointStatus& status) const noexcept {
+        std::shared_ptr<JointLogContext> context;
+        std::string name;
+        {
+            std::lock_guard<std::mutex> lock(joint_log_mutex_);
+            context = joint_log_context_;
+            name = joint_log_name_;
+        }
+        if (context) {
+            context->RecordStatus(name, status.pos, status.spd, status.tor, status.mosTemperature,
+                                  status.motorTemperature, static_cast<int>(status.error));
+        }
+    }
+
+    /** @brief 查询是否安装了关节级文件日志。 */
+    bool IsJointLogEnabled() const noexcept {
+        std::lock_guard<std::mutex> lock(joint_log_mutex_);
+        return static_cast<bool>(joint_log_context_);
     }
 
     /**
@@ -323,60 +362,49 @@ public:
     virtual void Stop(MotorStopMode mode, float current = 0, int feedback = 1) = 0;
 
     /**
-     * @brief 将当前位置设置为电机零点
-     * @return 成功返回 true
+     * @brief 查询整个关节是否支持机械抱闸，默认不支持。
+     * @return 双电机关节仅当两台电机均带抱闸时返回 true。
      */
-    virtual bool SetZero() = 0;
+    virtual bool HasBrake() const {
+        return false;
+    }
 
     /**
-     * @brief 驱动关节运动至限位
-     *
-     * 返回值为**关节坐标系**的偏置，可直接传入 `GotoZero`，
-     * 也可与 `GetStatus().pos` 等关节坐标系量配合使用。
-     * @param dir 移动方向（关节坐标系；1 或 -1）
-     * @param spd 移动速度（rad/s）
-     * @param cur 最大电流（A）
-     * @param timeout 超时时间
-     * @return 零点相对当前零点的偏置值（rad，关节坐标系），失败返回 NaN
+     * @brief 控制整个关节的机械抱闸，内部先检查 HasBrake()。
+     * @param enabled true 抱紧，false 释放，与 Motor::Brake() 一致。
+     * @return 所有电机操作均成功时返回 true；不支持时告警并返回 false。
+     * @note 默认实现不支持此操作；不执行失败回滚，驱动异常沿用原有异常通道。
      */
-    virtual float GotoLimit(int dir, float spd = 2.f, float cur = 2.f,
-                            std::chrono::milliseconds timeout = std::chrono::milliseconds{
-                                5000}) = 0;
+    virtual bool Brake(bool /*enabled*/) {
+        if (!HasBrake()) {
+            WarnProtection("Brake", "The current joint does not use brake-equipped motors");
+        }
+        return false;
+    }
 
     /**
-     * @brief 驱动关节运动至零点并重置零位
-     *
-     * `offset` 使用**关节坐标系**，与 `GotoLimit` 返回值及 `GetStatus().pos` 单位一致，
-     * 外部可直接将 `GetStatus().pos` 作为偏置传入。
-     * @param offset 零点相对当前零点的偏置值（rad，关节坐标系），通常由 `GotoLimit` 返回
-     * @param spd 移动速度（rad/s）
-     * @param cur 最大电流（A）
-     * @param timeout 超时时间
-     * @return 成功返回 true
+     * @brief 查询机械抱闸状态；不支持时告警并返回 false。
+     * @return true 表示至少一台电机已抱紧，false 表示全部释放或不支持。
+     * @note 双电机状态不一致时对未抱紧的电机补发抱闸命令；补发返回失败仍返回 true。
+     *       本接口可能阻塞并发送命令，驱动查询异常直接传播。
      */
-    virtual bool GotoZero(float offset, float spd = 2.f, float cur = 2.f,
-                          std::chrono::milliseconds timeout = std::chrono::milliseconds{5000}) = 0;
+    virtual bool GetBrakeStatus() {
+        if (!HasBrake()) {
+            WarnProtection("GetBrakeStatus",
+                           "The current joint does not use brake-equipped motors");
+        }
+        return false;
+    }
 
     /**
      * @brief 将当前位置转换为偏置值（不移动电机）
      *
      * 假设关节已运动至指定方向的限位，直接通过当前位置减去对应限位值计算偏置。
-     * 返回值与 `GotoLimit` 相同，可直接传入 `GotoZero`。
+     * 返回值为**关节坐标系**的偏置，可与 `GetStatus().pos` 等关节坐标系量配合使用。
      * @param dir 方向（关节坐标系；1 或 -1），1 对应 max 限位，-1 对应 min 限位
      * @return 零点偏置值（rad，关节坐标系），如位置不可用则返回 NaN
      */
     virtual float PosAsOffset(int dir) = 0;
-
-    /**
-     * @brief 校准关节限位（依次调用 GotoLimit 和 GotoZero）
-     * @param dir 校准方向（关节坐标系；1 或 -1）
-     * @param spd 校准速度（rad/s）
-     * @param cur 校准电流（A）
-     * @param timeout 每个阶段的超时时间
-     * @return 校准是否成功
-     */
-    virtual bool Calibrate(int dir, float spd = 2.f, float cur = 2.f,
-                           std::chrono::milliseconds timeout = std::chrono::milliseconds{5000}) = 0;
 
     /**
      * @brief 获取关节状态
@@ -452,6 +480,7 @@ protected:
     void WarnProtection(const char* mode, const char* reason) const {
         protection_logger_->warn("Joint protection: joint={}, mode={}, reason={}", protection_name_,
                                  mode, reason);
+        RecordProtectionForLog(mode, nullptr, reason, "warn");
     }
 
     /**
@@ -473,6 +502,7 @@ protected:
         }
         if (transition == ProtectionLogPoint::Transition::Entered) {
             LogProtectionEnter(protection_logger_, protection_name_, mode, reason, scope, detail);
+            RecordProtectionForLog(mode, scope, reason, "enter", detail);
         } else {
             LogProtectionExit(protection_logger_, protection_name_, mode, reason, scope);
         }
@@ -498,6 +528,7 @@ protected:
         }
         if (transition == ProtectionLogPoint::Transition::Entered) {
             protection_logger_->warn(fmt, std::forward<Args>(args)...);
+            RecordProtectionForLog(mode, nullptr, reason, "enter");
         } else {
             LogProtectionExit(protection_logger_, protection_name_, mode, reason);
         }
@@ -510,6 +541,86 @@ protected:
         LogProtection(mode, field, result != value, ProtectionLogDetail{field, value, result},
                       scope);
         return result;
+    }
+
+    void RecordCommandForLog(const char* type, std::optional<float> kp, std::optional<float> kd,
+                             std::optional<float> position, std::optional<float> speed,
+                             std::optional<float> current, std::optional<float> torque,
+                             std::optional<int> stop_mode, std::optional<bool> brake_enabled,
+                             std::optional<int> feedback,
+                             std::optional<int> pvt_mode = std::nullopt) const noexcept {
+        std::shared_ptr<JointLogContext> context;
+        std::string name;
+        {
+            std::lock_guard<std::mutex> lock(joint_log_mutex_);
+            context = joint_log_context_;
+            name = joint_log_name_;
+        }
+        if (context) {
+            context->RecordCommand(name, type, kp, kd, position, speed, current, torque, stop_mode,
+                                   brake_enabled, feedback, pvt_mode);
+        }
+    }
+
+    void RecordProtectionForLog(const char* mode, const char* scope, const char* reason,
+                                const char* state,
+                                const ProtectionLogDetail& detail = {}) const noexcept {
+        std::shared_ptr<JointLogContext> context;
+        std::string name;
+        {
+            std::lock_guard<std::mutex> lock(joint_log_mutex_);
+            context = joint_log_context_;
+            name = joint_log_name_;
+        }
+        if (!context) {
+            return;
+        }
+        std::optional<double> requested;
+        std::optional<double> applied;
+        if (detail.field != nullptr) {
+            requested = detail.requested;
+            applied = detail.applied;
+        }
+        context->RecordProtection(name, mode != nullptr ? mode : "", scope != nullptr ? scope : "",
+                                  reason != nullptr ? reason : "", state != nullptr ? state : "",
+                                  detail.field != nullptr ? detail.field : "", requested, applied);
+    }
+
+    void RecordPVTCommandForLog(float kp, float kd, float pos, float spd, float torque,
+                                PVTControlMode mode) const noexcept {
+        RecordCommandForLog("PVTControl", kp, kd, pos, spd, std::nullopt, torque, std::nullopt,
+                            std::nullopt, std::nullopt, static_cast<int>(mode));
+    }
+
+    void RecordPosCommandForLog(float position, float speed, float current,
+                                int feedback) const noexcept {
+        RecordCommandForLog("PosControl", std::nullopt, std::nullopt, position, speed, current,
+                            std::nullopt, std::nullopt, std::nullopt, feedback);
+    }
+
+    void RecordSpdCommandForLog(float speed, float current, int feedback) const noexcept {
+        RecordCommandForLog("SpdControl", std::nullopt, std::nullopt, std::nullopt, speed, current,
+                            std::nullopt, std::nullopt, std::nullopt, feedback);
+    }
+
+    void RecordCurCommandForLog(float current, int feedback) const noexcept {
+        RecordCommandForLog("CurControl", std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                            current, std::nullopt, std::nullopt, std::nullopt, feedback);
+    }
+
+    void RecordTorCommandForLog(float torque, int feedback) const noexcept {
+        RecordCommandForLog("TorControl", std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                            std::nullopt, torque, std::nullopt, std::nullopt, feedback);
+    }
+
+    void RecordStopCommandForLog(MotorStopMode mode, float current, int feedback) const noexcept {
+        RecordCommandForLog("Stop", std::nullopt, std::nullopt, std::nullopt, std::nullopt, current,
+                            std::nullopt, static_cast<int>(mode), std::nullopt, feedback);
+    }
+
+    void RecordBrakeCommandForLog(bool enabled) const noexcept {
+        RecordCommandForLog("Brake", std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                            std::nullopt, std::nullopt, enabled, std::nullopt, std::nullopt);
     }
 
     /**
@@ -537,6 +648,9 @@ protected:
     mutable std::map<std::pair<std::string_view, std::string_view>, ProtectionLogPoint>
         protection_points_;
     mutable std::mutex protection_points_mutex_;
+    mutable std::mutex joint_log_mutex_;
+    std::shared_ptr<JointLogContext> joint_log_context_;
+    std::string joint_log_name_;
     Range<float> limit_{};  ///< 位置限位范围；无限位关节不使用
     float maxSpd_{0.0f};    ///< 最大速度
     float maxTor_{0.0f};    ///< 最大扭矩

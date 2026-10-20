@@ -3,9 +3,8 @@
 
 #include "src/wasm/wasm_runtime.h"
 
-#include <nlohmann/json.hpp>
-
-#include "motor/motor_model_generated.h"
+#include "device/motor/motor_model_generated.h"
+#include "external/json.hpp"
 
 namespace encos {
 namespace wasm {
@@ -131,7 +130,8 @@ std::uint32_t RuntimeStore::CreateManager(const std::string& adapter_type,
                                           const std::string& adapter_name,
                                           const std::string& logger_name, LogLevel log_level) {
     const auto handle = CreateEmptyManager();
-    CreateAdapter(handle, adapter_type, adapter_name, logger_name, log_level);
+    CreateAdapter(handle, adapter_type, adapter_name, logger_name, log_level,
+                  nlohmann::json::object());
     return handle;
 }
 
@@ -146,12 +146,13 @@ std::uint32_t RuntimeStore::CreateEmptyManager() {
 
 void RuntimeStore::CreateAdapter(std::uint32_t manager_handle, const std::string& adapter_type,
                                  const std::string& adapter_name, const std::string& logger_name,
-                                 LogLevel log_level) {
+                                 LogLevel log_level, const nlohmann::json& extend) {
     auto* entry = GetManager(manager_handle);
     if (!entry || !entry->manager) {
         throw std::invalid_argument("Invalid manager handle");
     }
-    auto adapter = MakeAdapter(adapter_type, adapter_name, logger_name, log_level);
+    // 驱动器把四参数重载委托给本重载并传空对象，因此这里只保留一条路径
+    auto adapter = MakeAdapter(adapter_type, adapter_name, logger_name, log_level, extend);
     if (!adapter) {
         throw std::runtime_error("MakeAdapter returned null for " + adapter_type);
     }

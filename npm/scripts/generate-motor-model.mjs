@@ -22,12 +22,10 @@ const outPath = resolve(here, '../src/motor-model.generated.ts')
 function candidateCsvPaths() {
   const candidates = [
     // WASM FetchContent 构建产物目录
-    resolve(here, '../../build-wasm/_deps/encos_driver-src/src/motor/motor_models.csv'),
-    resolve(here, '../../build-wasm/_deps/motor_driver-src/src/motor/motor_models.csv'),
+    resolve(here, '../../build-wasm/_deps/encos_driver-src/src/device/motor/motor_models.csv'),
+    resolve(here, '../../build-wasm/_deps/motor_driver-src/src/device/motor/motor_models.csv'),
     // 与 joint_sdk 同级的 motor_driver 仓库
-    resolve(here, '../../motor_driver/src/motor/motor_models.csv'),
-    // 父目录下的 motor_driver 仓库
-    resolve(here, '../motor_driver/src/motor/motor_models.csv'),
+    resolve(here, '../../../motor_driver/src/device/motor/motor_models.csv'),
   ]
   if (process.env.MOTOR_MODELS_CSV) {
     candidates.unshift(resolve(process.env.MOTOR_MODELS_CSV))

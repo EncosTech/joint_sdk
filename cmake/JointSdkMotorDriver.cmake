@@ -52,18 +52,7 @@ function(joint_sdk_resolve_motor_driver)
             endif()
         endif()
 
-        # joint_sdk uses nlohmann_json directly. Under Emscripten it is not
-        # installed, so fetch it from the Encos internal mirror (pushed from
-        # GitHub with tags). Native builds continue to use find_package.
-        if(NOT TARGET nlohmann_json::nlohmann_json)
-            FetchContent_Declare(
-                nlohmann_json
-                GIT_REPOSITORY https://git.in.encos.cn/bismarckkk/json.git
-                GIT_TAG v3.11.3
-            )
-            FetchContent_MakeAvailable(nlohmann_json)
-        endif()
     else()
-        find_package(encos_driver 3.3.2 REQUIRED CONFIG)
+        find_package(encos_driver 4.0.0 REQUIRED CONFIG)
     endif()
 endfunction()

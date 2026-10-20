@@ -19,8 +19,6 @@
 #include <variant>
 #include <vector>
 
-#include <nlohmann/json.hpp>
-
 #include "BaseJoint.h"
 #include "DoubleCoupleJoint/DoubleCoupleJoint.h"
 #include "RJoint/ContinuousJoint.h"
@@ -29,6 +27,7 @@
 #include "bus/bus.h"
 #include "encos/encos_driver.h"
 #include "encos_motor.h"
+#include "external/json.hpp"
 
 namespace encos {
 
@@ -43,13 +42,16 @@ class JointManager;
 /**
  * @brief 解析适配器创建配置 JSON
  *
- * 接受形如 {"type": "EthercatIGH", "name": "0"} 的对象。
+ * 接受形如 {"type": "EthercatIGH", "name": "0", "extend": {...}} 的对象。
  * @param j 适配器创建配置。
  * @param type 输出的适配器类型。
  * @param name 输出的适配器名称。
- * @throw std::invalid_argument 当 j 不是对象、缺少 type/name 或二者不是字符串时抛出。
+ * @param extend 输出的适配器扩展配置；字段缺省或为 null 时输出空对象。
+ * @throw std::invalid_argument 当 j 不是对象、缺少 type/name、三者类型错误或 extend
+ *        不是对象时抛出。
  */
-inline void ParseAdapterDefinition(const nlohmann::json& j, std::string& type, std::string& name) {
+inline void ParseAdapterDefinition(const nlohmann::json& j, std::string& type, std::string& name,
+                                   nlohmann::json& extend) {
     if (!j.is_object()) {
         throw std::invalid_argument("Adapter JSON must be an object");
     }
@@ -63,6 +65,27 @@ inline void ParseAdapterDefinition(const nlohmann::json& j, std::string& type, s
     }
     type = it_type->get<std::string>();
     name = it_name->get<std::string>();
+    const auto it_extend = j.find("extend");
+    if (it_extend == j.end() || it_extend->is_null()) {
+        extend = nlohmann::json::object();
+        return;
+    }
+    if (!it_extend->is_object()) {
+        throw std::invalid_argument("Adapter JSON 'extend' must be an object");
+    }
+    extend = *it_extend;
+}
+
+/**
+ * @brief 解析适配器创建配置 JSON（不关心扩展配置的重载）
+ * @param j 适配器创建配置。
+ * @param type 输出的适配器类型。
+ * @param name 输出的适配器名称。
+ * @throw std::invalid_argument 语义同四参数重载。
+ */
+inline void ParseAdapterDefinition(const nlohmann::json& j, std::string& type, std::string& name) {
+    nlohmann::json extend;
+    ParseAdapterDefinition(j, type, name, extend);
 }
 
 /**
@@ -78,12 +101,37 @@ public:
      * @throw std::invalid_argument 当指定类型的适配器无法创建时抛出。
      */
     void CreateAdapter(const std::string& adapterType, const std::string& adapterName) {
-        if (adapters_.find(adapterName) != adapters_.end()) {
+        CreateAdapter(adapterType, adapterName, nlohmann::json::object());
+    }
+
+    /**
+     * @brief 创建适配器并传入扩展配置
+     * @param adapterType 适配器类型
+     * @param adapterName 适配器名称
+     * @param extend 适配器扩展配置，字段语义由插件自行定义；空对象表示不传扩展配置。
+     * @throw std::invalid_argument 当指定类型的适配器无法创建时抛出。
+     * @throw std::runtime_error 当 extend 不是 JSON 对象、插件缺失或插件构造失败时抛出。
+     *
+     * 适配器身份只由 adapterName 决定：
+     * - 名字未创建过：按 extend 创建适配器，只有导出 `MakeAdapterV2` 的插件会收到该配置；
+     * - 名字已存在且 extend 为空：保持既有幂等语义，直接返回已登记的实例；
+     * - 名字已存在且 extend 非空：仍回到驱动器，由它把 extend 中的 `buses` 条目经
+     *   `BaseAdapter::UpdateBusExtend` 增量应用到既有实例（顶层公共参数无法重新应用，
+     *   会被忽略并记录诊断），既有实例的登记不变。
+     */
+    void CreateAdapter(const std::string& adapterType, const std::string& adapterName,
+                       const nlohmann::json& extend) {
+        const bool already_registered = adapters_.find(adapterName) != adapters_.end();
+        if (already_registered && extend.empty()) {
             return;
         }
-        auto adapter = MakeAdapter(adapterType, adapterName, adapterName, log_level_);
+        auto adapter = MakeAdapter(adapterType, adapterName, adapterName, log_level_, extend);
         if (!adapter) {
             throw std::invalid_argument("Cannot create adapter: " + adapterName);
+        }
+        if (already_registered) {
+            // 既有实例已在注册表中，本次调用只为把 extend 增量应用到它
+            return;
         }
         adapter->SetSyncMode(sync_mode_enabled_);
         TrackAdapter(adapterName, std::move(adapter));
@@ -91,14 +139,16 @@ public:
 
     /**
      * @brief 按 JSON 配置创建适配器
-     * @param adapterJson 形如 {"type": "EthercatIGH", "name": "0"} 的对象
+     * @param adapterJson 形如 {"type": "EthercatIGH", "name": "0", "extend": {...}} 的对象
      * @throw std::invalid_argument 当 JSON 非法或指定类型的适配器无法创建时抛出。
+     * @throw std::runtime_error 当 extend 不是 JSON 对象、插件缺失或插件构造失败时抛出。
      */
     void CreateAdapter(const nlohmann::json& adapterJson) {
         std::string adapterType;
         std::string adapterName;
-        ParseAdapterDefinition(adapterJson, adapterType, adapterName);
-        CreateAdapter(adapterType, adapterName);
+        nlohmann::json extend;
+        ParseAdapterDefinition(adapterJson, adapterType, adapterName, extend);
+        CreateAdapter(adapterType, adapterName, extend);
     }
 
     /**
@@ -138,11 +188,12 @@ public:
     }
 
     /**
-     * @brief 为当前及后续创建的关节电机启用状态与控制命令文件日志
+     * @brief 为当前及后续创建的关节启用电机与关节级状态/命令文件日志
      *
      * 单适配器时日志基础名为 s<slaveId>b<busId>m<motorId>；多适配器时增加
      * <adapterName>_ 前缀。底层 driver 会分别追加 _status.csv.zstd 和
-     * _command.csv.zstd 后缀。
+     * _command.csv.zstd 后缀；每个关节还会创建独立的 <jointName>_command.csv.zstd 和
+     * <jointName>_status.csv.zstd，所有关节保护告警写入 joint_protection.csv.zstd。
      * @param path 日志文件输出目录；目录不存在时自动创建。
      */
     void EnableLog(const std::filesystem::path& path) {
@@ -155,7 +206,12 @@ public:
             throw std::invalid_argument("Log path is not a directory: " + absolute_path.string());
         }
 
+        auto joint_log = std::make_shared<JointLogContext>(absolute_path);
         log_path_ = absolute_path;
+        joint_log_context_ = std::move(joint_log);
+        for (const auto& [name, joint] : joints_) {
+            joint->SetJointLogContext(joint_log_context_, name);
+        }
         EnableTrackedMotorLogs(adapters_.size() > 1);
     }
 
@@ -168,6 +224,10 @@ public:
         for (const auto& [_, motor] : motors_) {
             motor->DisableLog();
         }
+        for (const auto& [_, joint] : joints_) {
+            joint->SetJointLogContext(nullptr, {});
+        }
+        joint_log_context_.reset();
         log_path_.clear();
     }
 
@@ -184,7 +244,7 @@ public:
                 return false;
             }
         }
-        return true;
+        return static_cast<bool>(joint_log_context_);
     }
 
     /**
@@ -354,6 +414,7 @@ public:
             if (it == pending_pairs_.end()) {
                 auto slave = DoubleCoupleJoint::CreateJoint(config);
                 slave->SetProtectionLogContext(logger_, jointName);
+                ConfigureJointLog(slave, jointName);
                 joints_[jointName] = slave;
                 pending_pairs_[key] = std::static_pointer_cast<SlaveJoint>(slave);
                 return slave;
@@ -368,6 +429,7 @@ public:
             auto master = DoubleCoupleJoint::CreateJoint(config, motor1, motor2, pendingSlave);
             master->SetProtectionLogContext(logger_,
                                             jointName + "/" + pendingSlave->GetProtectionName());
+            ConfigureJointLog(master, jointName);
             RegisterMotor(config.motorParams1, motor1);
             RegisterMotor(config.motorParams2, motor2);
             pending_pairs_.erase(it);
@@ -379,6 +441,7 @@ public:
             ApplyMotorCanFd(motor, config.motorParams.canfd);
             auto joint = std::make_shared<JointType>(config, motor);
             joint->SetProtectionLogContext(logger_, jointName);
+            ConfigureJointLog(joint, jointName);
             RegisterMotor(config.motorParams, motor);
             joints_[jointName] = joint;
             return joint;
@@ -450,27 +513,6 @@ public:
     void SetAdaptersStatusMaxLifeCycle(int maxLifeCycle) {
         for (auto& [_, adapter] : adapters_) {
             adapter->SetMaxStatusLifeCycle(maxLifeCycle);
-        }
-    }
-
-    /**
-     * @brief 校准关节
-     *
-     * 对所有关节依次调用 Calibrate。RJoint 执行 GotoLimit + GotoZero；
-     * DoubleCoupleJoint（闭链结构）Calibrate 返回 false，触发失败处理。
-     * @param dirs 关节名称到校准方向的映射
-     * @throw std::runtime_error 如果校准失败
-     */
-    void Calibrate(const std::map<std::string, int>& dirs) {
-        for (const auto& [name, dir] : dirs) {
-            auto jointIt = joints_.find(name);
-            if (jointIt == joints_.end()) {
-                continue;
-            }
-            if (!jointIt->second->Calibrate(dir)) {
-                jointIt->second->Stop(encos::MotorStopMode::FullBrake);
-                throw std::runtime_error("Calibrate " + name + " failed");
-            }
         }
     }
 
@@ -584,7 +626,7 @@ protected:
             throw std::invalid_argument(AdapterLookupError(motor_params));
         }
         buses_.insert((*adapter)->GetBus(motor_params.BusIndex()));
-        MotorUniqueId id{motor_params.AdapterIdString(), motor_params.BusIndex(),
+        MotorUniqueId id{motor_params.AdapterIdentityKey(), motor_params.BusIndex(),
                          motor_params.motorId};
         const auto [it, inserted] = motors_.emplace(std::move(id), motor);
         if (inserted && !log_path_.empty()) {
@@ -630,6 +672,12 @@ protected:
     void EnableTrackedMotorLogs(bool multiple_adapters) {
         for (const auto& [motor_id, motor] : motors_) {
             motor->EnableLog(MotorLogBaseName(motor_id, multiple_adapters).string());
+        }
+    }
+
+    void ConfigureJointLog(const BaseJointPtr& joint, const std::string& name) {
+        if (joint && joint_log_context_) {
+            joint->SetJointLogContext(joint_log_context_, name);
         }
     }
 
@@ -700,6 +748,7 @@ protected:
     LogLevel log_level_{LogLevel::Info};       ///< 创建适配器时使用的日志级别
     LoggerPtr logger_{JointSdkLogger::Get()};  ///< 关节保护共享日志器
     std::filesystem::path log_path_;           ///< Motor 文件日志输出目录
+    std::shared_ptr<JointLogContext> joint_log_context_;  ///< 关节级 CSV 日志会话
 };
 
 /**

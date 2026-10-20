@@ -21,7 +21,8 @@
 #include <vector>
 
 #include <gtest/gtest.h>
-#include <nlohmann/json.hpp>
+
+#include "external/json.hpp"
 #if ENCOS_ENABLE_SPDLOG
 #include <sstream>
 
@@ -131,7 +132,7 @@ DoubleCoupleJoint::Config CreateDoubleCoupleJointConfig(DoubleCoupleJointAxis ax
 }
 
 DoubleCoupleJoint::Config CreateH130AnkleDoubleCoupleJointConfig(DoubleCoupleJointAxis axis,
-                                                                 MotorPVTRanges ranges) {
+                                                                 MotorProperties ranges) {
     DoubleCoupleJoint::Config config{};
     config.motorParams1 = MotorParams{"adapter1", 0, 5, MotorInitParams{ranges}};
     config.motorParams2 = MotorParams{"adapter1", 0, 6, MotorInitParams{ranges}};
@@ -152,9 +153,9 @@ DoubleCoupleJoint::Config CreateH130AnkleDoubleCoupleJointConfig(DoubleCoupleJoi
     return config;
 }
 
-MotorPVTRanges CreateMotorRanges(float position_limit = 12.5f, float speed_limit = 18.0f,
-                                 float torque_limit = 30.0f, float current_limit = 30.0f) {
-    MotorPVTRanges ranges{};
+MotorProperties CreateMotorRanges(float position_limit = 12.5f, float speed_limit = 18.0f,
+                                  float torque_limit = 30.0f, float current_limit = 30.0f) {
+    MotorProperties ranges{};
     ranges.kp = Range<float>{0.0f, 500.0f};
     ranges.kd = Range<float>{0.0f, 5.0f};
     ranges.position = Range<float>{-position_limit, position_limit};
@@ -166,7 +167,7 @@ MotorPVTRanges CreateMotorRanges(float position_limit = 12.5f, float speed_limit
 }
 
 DoubleCoupleJoint::Config CreateDoubleCoupleJointConfigWithRanges(DoubleCoupleJointAxis axis,
-                                                                  MotorPVTRanges ranges) {
+                                                                  MotorProperties ranges) {
     auto config = CreateDoubleCoupleJointConfig(axis);
     config.motorParams1.initParam = MotorInitParams{ranges};
     config.motorParams2.initParam = MotorInitParams{ranges};
@@ -239,7 +240,7 @@ struct ExpectedMotorCurrents {
 };
 
 PairedDoubleCoupleFixture CreatePairedDoubleCoupleFixture(
-    const std::string& adapter_name, MotorPVTRanges ranges, bool master_reverse = false,
+    const std::string& adapter_name, MotorProperties ranges, bool master_reverse = false,
     bool slave_reverse = false, std::optional<Range<float>> motor_limit1 = std::nullopt,
     std::optional<Range<float>> motor_limit2 = std::nullopt,
     std::optional<Range<float>> master_limit = std::nullopt,
@@ -283,7 +284,7 @@ PairedDoubleCoupleFixture CreatePairedDoubleCoupleFixture(
 }
 
 PairedDoubleCoupleFixture CreateH130AnklePairedDoubleCoupleFixture(const std::string& adapter_name,
-                                                                   MotorPVTRanges ranges) {
+                                                                   MotorProperties ranges) {
     auto adapter = CreateFakeAdapterHarness(adapter_name);
     AdapterMap adapters{{"adapter1", adapter->Adapter()}};
 
@@ -305,7 +306,7 @@ PairedDoubleCoupleFixture CreateH130AnklePairedDoubleCoupleFixture(const std::st
     return PairedDoubleCoupleFixture{adapter, master, slave, motor1, motor2};
 }
 
-RJointFixture CreateRJointFixture(const std::string& adapter_name, MotorPVTRanges ranges,
+RJointFixture CreateRJointFixture(const std::string& adapter_name, MotorProperties ranges,
                                   bool reverse = false) {
     auto adapter = CreateFakeAdapterHarness(adapter_name);
     AdapterMap adapters{{"adapter1", adapter->Adapter()}};
@@ -325,7 +326,7 @@ RJointFixture CreateRJointFixture(const std::string& adapter_name, MotorPVTRange
 }
 
 ContinuousJointFixture CreateContinuousJointFixture(const std::string& adapter_name,
-                                                    MotorPVTRanges ranges, bool reverse = false) {
+                                                    MotorProperties ranges, bool reverse = false) {
     auto adapter = CreateFakeAdapterHarness(adapter_name);
     AdapterMap adapters{{"adapter1", adapter->Adapter()}};
 
@@ -371,19 +372,19 @@ nlohmann::json CreateContinuousJointConfigJson(uint32_t motor_id = 1) {
 }
 
 float DecodePvtPosition(const FakeCommandRecord& command,
-                        [[maybe_unused]] const MotorPVTRanges& ranges) {
+                        [[maybe_unused]] const MotorProperties& ranges) {
     EXPECT_EQ(command.kind, FakeCommandKind::PVTControl);
     return std::get<FakePVTControlPayload>(command.payload).position;
 }
 
 float DecodePvtSpeed(const FakeCommandRecord& command,
-                     [[maybe_unused]] const MotorPVTRanges& ranges) {
+                     [[maybe_unused]] const MotorProperties& ranges) {
     EXPECT_EQ(command.kind, FakeCommandKind::PVTControl);
     return std::get<FakePVTControlPayload>(command.payload).speed;
 }
 
 float DecodePvtTorque(const FakeCommandRecord& command,
-                      [[maybe_unused]] const MotorPVTRanges& ranges) {
+                      [[maybe_unused]] const MotorProperties& ranges) {
     EXPECT_EQ(command.kind, FakeCommandKind::PVTControl);
     return std::get<FakePVTControlPayload>(command.payload).torque;
 }
@@ -434,11 +435,24 @@ const FakeCommandRecord* FindSentMessage(const std::vector<FakeCommandRecord>& m
     return it == messages.end() ? nullptr : &(*it);
 }
 
+/**
+ * @brief 断言所有命令的 CAN FD 帧标志一致
+ *
+ * 电机在构造期会发一帧固件版本查询（0x32），它早于用例设置 CAN FD，因此不计入断言。
+ */
 void ExpectAllMessagesUseCanFd(const std::vector<FakeCommandRecord>& messages, bool expected) {
-    ASSERT_FALSE(messages.empty());
+    bool checked_any = false;
     for (const auto& message : messages) {
+        if (message.kind == FakeCommandKind::GetParameter) {
+            const auto* payload = std::get_if<FakeGetParameterPayload>(&message.payload);
+            if (payload != nullptr && payload->parameter == MotorParameter::FirmwareVersion) {
+                continue;
+            }
+        }
         EXPECT_EQ(CanFrameFlagsUseCanFd(message.raw_frame_flags), expected);
+        checked_any = true;
     }
+    EXPECT_TRUE(checked_any);
 }
 
 void ExpectStopMessagesWithZeroCurrent(const std::vector<FakeCommandRecord>& messages,
@@ -501,7 +515,7 @@ void ExpectPositionHoldMessage(const FakeCommandRecord& message, float expected_
 }
 
 void ExpectPvtTorqueCommands(const std::vector<FakeCommandRecord>& messages, float torque1,
-                             float torque2, const MotorPVTRanges& ranges) {
+                             float torque2, const MotorProperties& ranges) {
     ASSERT_EQ(messages.size(), 2u);
     for (int id : {1, 2}) {
         const auto* message = FindSentMessage(messages, id);
@@ -514,15 +528,16 @@ void ExpectPvtTorqueCommands(const std::vector<FakeCommandRecord>& messages, flo
 
 void ExpectPositionHoldMessages(const std::vector<FakeCommandRecord>& messages,
                                 const ExpectedMotorPositions& expected_positions,
-                                const MotorPVTRanges& ranges, int expected_feedback = 1) {
+                                const MotorProperties& ranges, int expected_feedback = 1) {
     ASSERT_EQ(messages.size(), 2u);
     const auto* motor1_message = FindSentMessage(messages, 1);
     const auto* motor2_message = FindSentMessage(messages, 2);
     ASSERT_NE(motor1_message, nullptr);
     ASSERT_NE(motor2_message, nullptr);
-    ExpectPositionHoldMessage(*motor1_message, expected_positions.motor1, ranges.speed.max, 3.0f,
+    const float current = std::min(3.0f / ranges.kt, ranges.current.max);
+    ExpectPositionHoldMessage(*motor1_message, expected_positions.motor1, ranges.speed.max, current,
                               expected_feedback);
-    ExpectPositionHoldMessage(*motor2_message, expected_positions.motor2, ranges.speed.max, 3.0f,
+    ExpectPositionHoldMessage(*motor2_message, expected_positions.motor2, ranges.speed.max, current,
                               expected_feedback);
 }
 
@@ -643,7 +658,7 @@ ExpectedMotorValues ApplyExpectedUniformScale(ExpectedMotorValues expected,
 
 ExpectedMotorValues CalculateExpectedMotorSpeeds(DoubleCoupleJointAxis axis, double roll,
                                                  double pitch, float speed,
-                                                 const MotorPVTRanges& ranges) {
+                                                 const MotorProperties& ranges) {
     couple_joint::MechanismSolver solver(CreateValidCalibrationInput());
     const auto inverse_result = solver.SolveInverse(roll, pitch);
     EXPECT_TRUE(inverse_result.status == couple_joint::SolveStatus::Success ||
@@ -662,7 +677,7 @@ ExpectedMotorValues CalculateExpectedMotorSpeeds(DoubleCoupleJointAxis axis, dou
 
 ExpectedMotorValues CalculateExpectedCombinedMotorSpeeds(double roll, double pitch,
                                                          float roll_speed, float pitch_speed,
-                                                         const MotorPVTRanges& ranges) {
+                                                         const MotorProperties& ranges) {
     couple_joint::MechanismSolver solver(CreateValidCalibrationInput());
     const auto inverse_result = solver.SolveInverse(roll, pitch);
     EXPECT_TRUE(inverse_result.status == couple_joint::SolveStatus::Success ||
@@ -677,7 +692,7 @@ ExpectedMotorValues CalculateExpectedCombinedMotorSpeeds(double roll, double pit
 
 ExpectedMotorValues CalculateExpectedMotorTorques(DoubleCoupleJointAxis axis, double roll,
                                                   double pitch, float torque,
-                                                  const MotorPVTRanges& ranges) {
+                                                  const MotorProperties& ranges) {
     couple_joint::MechanismSolver solver(CreateValidCalibrationInput());
     const auto inverse_result = solver.SolveInverse(roll, pitch);
     EXPECT_TRUE(inverse_result.status == couple_joint::SolveStatus::Success ||
@@ -711,7 +726,7 @@ ExpectedMotorValues CalculateExpectedMotorGains(double roll, double pitch, float
 
 ExpectedMotorValues CalculateExpectedCombinedMotorTorques(double roll, double pitch,
                                                           float roll_torque, float pitch_torque,
-                                                          const MotorPVTRanges& ranges) {
+                                                          const MotorProperties& ranges) {
     couple_joint::MechanismSolver solver(CreateValidCalibrationInput());
     const auto inverse_result = solver.SolveInverse(roll, pitch);
     EXPECT_TRUE(inverse_result.status == couple_joint::SolveStatus::Success ||
@@ -726,7 +741,7 @@ ExpectedMotorValues CalculateExpectedCombinedMotorTorques(double roll, double pi
 
 ExpectedMotorCurrents CalculateExpectedMotorCurrents(DoubleCoupleJointAxis axis, double roll,
                                                      double pitch, float current,
-                                                     const MotorPVTRanges& ranges) {
+                                                     const MotorProperties& ranges) {
     couple_joint::MechanismSolver solver(CreateValidCalibrationInput());
     const auto inverse_result = solver.SolveInverse(roll, pitch);
     EXPECT_TRUE(inverse_result.status == couple_joint::SolveStatus::Success ||
@@ -1016,6 +1031,61 @@ TEST(JointManagerTest, CreateAdapterFromJsonRejectsInvalidDefinitions) {
     // 未知类型的适配器由插件加载器抛 std::runtime_error，向上原样传播
     EXPECT_THROW(manager.CreateAdapter(nlohmann::json{{"type", "NoSuchPlugin"}, {"name", "x"}}),
                  std::runtime_error);
+}
+
+TEST(JointManagerTest, CreateAdapterAcceptsExtendConfiguration) {
+    TestableJointManager manager;
+
+    // Fake 插件未导出 MakeAdapterV2，仍按内置默认参数创建成功
+    ASSERT_NO_THROW(manager.CreateAdapter("Fake", "extend_adapter",
+                                          nlohmann::json{{"buses", nlohmann::json::array()}}));
+    EXPECT_NE(manager.Adapter("extend_adapter"), nullptr);
+    const auto first = manager.Adapter("extend_adapter");
+
+    // 空对象等价于不带扩展配置：保持幂等，不替换已登记实例
+    ASSERT_NO_THROW(manager.CreateAdapter("Fake", "extend_adapter", nlohmann::json::object()));
+    EXPECT_EQ(manager.Adapter("extend_adapter"), first);
+
+    // extend 非对象由驱动器拒绝：创建新适配器时同样会先校验，说明 extend 确实被转发
+    EXPECT_THROW(manager.CreateAdapter("Fake", "extend_bad_value", nlohmann::json("not_object")),
+                 std::runtime_error);
+    EXPECT_EQ(manager.AdaptersByName().count("extend_bad_value"), 0u);
+}
+
+TEST(JointManagerTest, CreateAdapterFromJsonParsesExtend) {
+    TestableJointManager manager;
+
+    manager.CreateAdapter(nlohmann::json{{"type", "Fake"},
+                                         {"name", "json_extend"},
+                                         {"extend", {{"buses", nlohmann::json::array()}}}});
+    EXPECT_NE(manager.Adapter("json_extend"), nullptr);
+
+    // extend 缺省或为 null 视为空对象
+    EXPECT_NO_THROW(
+        manager.CreateAdapter(nlohmann::json{{"type", "Fake"}, {"name", "json_without_extend"}}));
+    EXPECT_NO_THROW(manager.CreateAdapter(
+        nlohmann::json{{"type", "Fake"}, {"name", "json_null_extend"}, {"extend", nullptr}}));
+
+    // extend 必须是对象
+    EXPECT_THROW(manager.CreateAdapter(nlohmann::json{
+                     {"type", "Fake"}, {"name", "json_bad_extend"}, {"extend", "not_object"}}),
+                 std::invalid_argument);
+    EXPECT_EQ(manager.AdaptersByName().count("json_bad_extend"), 0u);
+}
+
+TEST(JointManagerTest, CreateAdapterReappliesExtendToExistingAdapter) {
+    TestableJointManager manager;
+    manager.CreateAdapter("Fake", "extend_existing");
+    const auto existing = manager.Adapter("extend_existing");
+    ASSERT_NE(existing, nullptr);
+
+    // 名字已存在且 extend 非空时仍回到驱动器：驱动器把非对象 extend 判为非法并抛
+    // runtime_error。若 SDK 在此处提前返回，这次调用不会抛，以此确认 extend 被转发。
+    EXPECT_THROW(manager.CreateAdapter("Fake", "extend_existing", nlohmann::json("not_object")),
+                 std::runtime_error);
+    // 既有实例仍按原样登记，没有被替换或清除
+    EXPECT_EQ(manager.Adapter("extend_existing"), existing);
+    EXPECT_EQ(manager.AdaptersById().size(), 1u);
 }
 
 // ============================================================
@@ -1456,10 +1526,14 @@ TEST(JointManagerLogTest, PrefixesNamesWhenManagerHasMultipleAdapters) {
     manager.EnableLog(directory.Path());
     manager.DisableLog();
 
-    EXPECT_TRUE(std::filesystem::exists(directory.Path() / "left_s0b0m1_status.csv.zstd"));
-    EXPECT_TRUE(std::filesystem::exists(directory.Path() / "left_s0b0m1_command.csv.zstd"));
-    EXPECT_TRUE(std::filesystem::exists(directory.Path() / "right_s0b0m1_status.csv.zstd"));
-    EXPECT_TRUE(std::filesystem::exists(directory.Path() / "right_s0b0m1_command.csv.zstd"));
+    EXPECT_TRUE(
+        std::filesystem::exists(directory.Path() / "name%3A4%3Aleft_s0b0m1_status.csv.zstd"));
+    EXPECT_TRUE(
+        std::filesystem::exists(directory.Path() / "name%3A4%3Aleft_s0b0m1_command.csv.zstd"));
+    EXPECT_TRUE(
+        std::filesystem::exists(directory.Path() / "name%3A5%3Aright_s0b0m1_status.csv.zstd"));
+    EXPECT_TRUE(
+        std::filesystem::exists(directory.Path() / "name%3A5%3Aright_s0b0m1_command.csv.zstd"));
 }
 
 TEST(JointManagerLogTest, AppliesEnabledLoggingToFutureMotors) {
@@ -1547,8 +1621,10 @@ TEST(JointManagerLogTest, EscapesAdapterNameInMultiAdapterFileName) {
 
     manager.EnableLog(directory.Path());
     manager.DisableLog();
-    EXPECT_TRUE(std::filesystem::exists(directory.Path() / "left%2Fright_s0b0m1_status.csv.zstd"));
-    EXPECT_TRUE(std::filesystem::exists(directory.Path() / "left%2Fright_s0b0m1_command.csv.zstd"));
+    EXPECT_TRUE(std::filesystem::exists(directory.Path() /
+                                        "name%3A10%3Aleft%2Fright_s0b0m1_status.csv.zstd"));
+    EXPECT_TRUE(std::filesystem::exists(directory.Path() /
+                                        "name%3A10%3Aleft%2Fright_s0b0m1_command.csv.zstd"));
 }
 
 TEST(JointManagerLogTest, KeepsDistinctRawBusIdsDistinctInFileNames) {
@@ -1602,9 +1678,12 @@ TEST(JointManagerLogTest, DoesNotRenameActiveLogsWhenSecondAdapterIsCreated) {
     manager.DisableLog();
     EXPECT_TRUE(std::filesystem::exists(directory.Path() / "s0b0m2_status.csv.zstd"));
     EXPECT_TRUE(std::filesystem::exists(directory.Path() / "s0b0m2_command.csv.zstd"));
-    EXPECT_FALSE(std::filesystem::exists(directory.Path() / "first_s0b0m2_status.csv.zstd"));
-    EXPECT_TRUE(std::filesystem::exists(directory.Path() / "second_s0b0m3_status.csv.zstd"));
-    EXPECT_TRUE(std::filesystem::exists(directory.Path() / "second_s0b0m3_command.csv.zstd"));
+    EXPECT_FALSE(
+        std::filesystem::exists(directory.Path() / "name%3A5%3Afirst_s0b0m2_status.csv.zstd"));
+    EXPECT_TRUE(
+        std::filesystem::exists(directory.Path() / "name%3A6%3Asecond_s0b0m3_status.csv.zstd"));
+    EXPECT_TRUE(
+        std::filesystem::exists(directory.Path() / "name%3A6%3Asecond_s0b0m3_command.csv.zstd"));
 }
 
 TEST(JointManagerLogTest, ResolvesRelativePathBeforeFutureMotorCreation) {
@@ -2305,21 +2384,15 @@ TEST(DoubleCoupleJointSafetyTest, CurrentRespectsJointTorqueLimit) {
             // 动态类控制按合帧下发：本轴命令 + 另一轴命令各一次
             if (slave) {
                 fixture.slave->CurControl(current);
-                fixture.master->CurControl(0.0f);
+                EXPECT_THROW(fixture.master->CurControl(0.0f), JointException);
             } else {
                 fixture.master->CurControl(current);
-                fixture.slave->CurControl(0.0f);
+                EXPECT_THROW(fixture.slave->CurControl(0.0f), JointException);
             }
             const auto records = fixture.adapter->GetCommandRecords();
             ASSERT_EQ(records.size(), 2u);
-            couple_joint::MechanismSolver solver(CreateValidCalibrationInput());
-            solver.SolveInverse(0, 0);
-            const auto torque =
-                solver.SolveForwardTorque(DecodeCurrentCommand(*FindSentMessage(records, 1)),
-                                          DecodeCurrentCommand(*FindSentMessage(records, 2)));
-            EXPECT_LE(std::abs(torque.roll), 3.02);
-            EXPECT_LE(std::abs(torque.pitch), 3.02);
-            EXPECT_NEAR(slave ? torque.pitch : torque.roll, std::copysign(3.0, current), 0.02);
+            for (const auto& record : records)
+                EXPECT_EQ(record.kind, FakeCommandKind::PosControl);
         }
     }
 }
@@ -2364,16 +2437,9 @@ TEST(DoubleCoupleJointSafetyTest, CurrentTorqueLimitUsesFeedbackPoseKtAndReverse
     ASSERT_TRUE(fixture.master->GetStatus(false, 0).has_value());
     fixture.adapter->ClearCommandRecords();
     fixture.slave->CurControl(20);
-    fixture.master->CurControl(0.0f);
-    const auto records = fixture.adapter->GetCommandRecords();
-    ASSERT_EQ(records.size(), 2u);
-    couple_joint::MechanismSolver solver(CreateValidCalibrationInput());
-    solver.SolveInverse(0.04, -0.02);
-    const auto torque =
-        solver.SolveForwardTorque(DecodeCurrentCommand(*FindSentMessage(records, 1)) * ranges.kt,
-                                  DecodeCurrentCommand(*FindSentMessage(records, 2)) * ranges.kt);
-    EXPECT_NEAR(torque.roll, 0.0, 0.02);
-    EXPECT_NEAR(torque.pitch, -3.0, 0.02);
+    EXPECT_THROW(fixture.master->CurControl(0.0f), JointException);
+    ExpectPositionHoldMessages(fixture.adapter->GetCommandRecords(),
+                               CalculateExpectedMotorPositions(0.04, -0.02), ranges);
 }
 
 TEST(DoubleCoupleJointPositionControlTest, StopCancelsPendingPositionBatch) {
@@ -2577,16 +2643,7 @@ TEST(ContinuousJointTest, RejectsPositionAndLimitOperationsWithoutSendingCommand
             fixture.joint->SetLimit(Range<float>{-1.0f, 1.0f});
         },
         [&] {
-            (void) fixture.joint->GotoLimit(1);
-        },
-        [&] {
-            (void) fixture.joint->GotoZero(0.0f);
-        },
-        [&] {
             (void) fixture.joint->PosAsOffset(1);
-        },
-        [&] {
-            (void) fixture.joint->Calibrate(1);
         },
     };
 
@@ -2684,25 +2741,6 @@ TEST(ContinuousJointTest, CallbackAndPullStatusShareUnwrappedPosition) {
     EXPECT_NEAR(first_pull->pos, callback_positions[0], 0.001f);
     EXPECT_NEAR(callback_positions[1], -12.6f, 0.02f);
     EXPECT_NEAR(second_pull->pos, callback_positions[1], 0.001f);
-}
-
-TEST(ContinuousJointTest, SuccessfulSetZeroResetsUnwrappedPosition) {
-    auto fixture = CreateContinuousJointFixture("continuous_zero", CreateMotorRanges());
-    EmitFakeFeedback(*fixture.adapter, fixture.motor, 12.4f);
-    ASSERT_TRUE(fixture.joint->GetStatus(false, 0).has_value());
-    EmitFakeFeedback(*fixture.adapter, fixture.motor, -12.4f);
-    ASSERT_NEAR(fixture.joint->GetStatus(false, 0)->pos, 12.6f, 0.02f);
-
-    fixture.adapter->SetReplyMode(FakeReplyMode::Automatic);
-    ASSERT_TRUE(fixture.joint->SetZero());
-    fixture.adapter->SetReplyMode(FakeReplyMode::Manual);
-
-    EXPECT_FALSE(fixture.joint->GetStatus(false, 0).has_value());
-    EmitFakeFeedback(*fixture.adapter, fixture.motor, 0.2f);
-
-    const auto status = fixture.joint->GetStatus(false, 0);
-    ASSERT_TRUE(status.has_value());
-    EXPECT_NEAR(status->pos, 0.2f, 0.02f);
 }
 
 TEST(ContinuousJointTest, AutoSendUsesInternalPvtFeedbackCommand) {
@@ -2940,17 +2978,14 @@ TEST(DoubleCoupleJointPairingTest, RejectsInvalidCalibrationBeforeCreatingMotors
     FAIL() << "Expected calibration failure JointException";
 }
 
-TEST(SlaveJointTest, PendingUnsupportedCalibrationHelpersDoNotThrowNotPaired) {
+TEST(SlaveJointTest, PendingUnsupportedPosAsOffsetDoesNotThrowNotPaired) {
     auto slave_config = CreateDoubleCoupleJointConfig(DoubleCoupleJointAxis::Pitch);
     auto slave = std::static_pointer_cast<SlaveJoint>(DoubleCoupleJoint::CreateJoint(slave_config));
 
-    EXPECT_TRUE(std::isnan(slave->GotoLimit(1)));
-    EXPECT_FALSE(slave->GotoZero(0.0f));
     EXPECT_TRUE(std::isnan(slave->PosAsOffset(1)));
-    EXPECT_FALSE(slave->Calibrate(1));
 
     try {
-        (void) slave->SetZero();
+        slave->Stop(MotorStopMode::FullBrake);
     } catch (const JointException& ex) {
         EXPECT_EQ(ex.Error(), JointError::kDoubleCoupleJointNotPaired);
         return;
@@ -3036,7 +3071,7 @@ TEST(DoubleCoupleJointPVTControlTest, SlavePitchPvtUsesCachedRollTarget) {
 
     fixture.master->PVTControl(10.0f, 1.0f, 0.05f, 0.3f, 0.2f);
     fixture.adapter->ClearCommandRecords();
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.04f, 0.2f, 0.1f);
+    fixture.slave->PVTControl(10.0f, 1.0f, -0.04f, 0.2f, 0.1f);
 
     const auto& messages = fixture.adapter->GetCommandRecords();
     ASSERT_EQ(messages.size(), 2u);
@@ -3056,7 +3091,7 @@ TEST(DoubleCoupleJointPVTControlTest, BatchesTwoAxisPvtControlsIntoFinalMotorCom
     fixture.master->PVTControl(10.0f, 1.0f, 0.05f, 0.3f, 0.2f);
     EXPECT_TRUE(fixture.adapter->GetCommandRecords().empty());
 
-    fixture.master->PVTControlForSlave(11.0f, 1.5f, -0.04f, 0.0f, 0.0f);
+    fixture.slave->PVTControl(11.0f, 1.5f, -0.04f, 0.0f, 0.0f);
 
     const auto& messages = fixture.adapter->GetCommandRecords();
     ASSERT_EQ(messages.size(), 2u);
@@ -3126,46 +3161,6 @@ TEST(DoubleCoupleJointPVTControlTest, MapsCombinedSpeedAndTorqueAtActualFeedback
     EXPECT_NEAR(DecodePvtTorque(*motor2_message, ranges), expected_torques.motor2, 0.01f);
 }
 
-TEST(DoubleCoupleJointPVTControlTest, SetZeroResetsActualPoseUsedForGainMapping) {
-    const auto ranges = CreateMotorRanges();
-    auto fixture = CreatePairedDoubleCoupleFixture("pvt_set_zero_actual_pose_adapter", ranges);
-    EmitDoubleCoupleFeedback(fixture, CalculateExpectedMotorPositions(0.2, -0.15));
-
-    fixture.adapter->SetReplyMode(FakeReplyMode::Automatic);
-    ASSERT_TRUE(fixture.master->SetZero());
-    fixture.adapter->SetReplyMode(FakeReplyMode::Manual);
-    fixture.adapter->ClearCommandRecords();
-
-    const auto new_positions = CalculateExpectedMotorPositions(0.1, -0.05);
-    EmitMotor1Feedback(fixture, new_positions.motor1);
-
-    fixture.master->PVTControl(12.0f, 8.0f, 0.05f, 0.0f, 0.0f);
-    fixture.slave->PVTControl(21.0f, 13.0f, -0.04f, 0.0f, 0.0f);
-
-    const auto& messages = fixture.adapter->GetCommandRecords();
-    ASSERT_EQ(messages.size(), 2u);
-    const auto* motor1_message = FindSentMessage(messages, 1);
-    const auto* motor2_message = FindSentMessage(messages, 2);
-    ASSERT_NE(motor1_message, nullptr);
-    ASSERT_NE(motor2_message, nullptr);
-    const auto expected_kp = CalculateExpectedMotorGains(0.0, 0.0, 12.0f, 21.0f);
-    EXPECT_NEAR(DecodePvtKp(*motor1_message), expected_kp.motor1, 0.15f);
-    EXPECT_NEAR(DecodePvtKp(*motor2_message), expected_kp.motor2, 0.15f);
-
-    EmitMotor2Feedback(fixture, new_positions.motor2);
-    fixture.master->PVTControl(12.0f, 8.0f, 0.05f, 0.0f, 0.0f);
-    fixture.slave->PVTControl(21.0f, 13.0f, -0.04f, 0.0f, 0.0f);
-    const auto& refreshed_messages = fixture.adapter->GetCommandRecords();
-    ASSERT_EQ(refreshed_messages.size(), 2u);
-    motor1_message = FindSentMessage(refreshed_messages, 1);
-    motor2_message = FindSentMessage(refreshed_messages, 2);
-    ASSERT_NE(motor1_message, nullptr);
-    ASSERT_NE(motor2_message, nullptr);
-    const auto refreshed_kp = CalculateExpectedMotorGains(0.1, -0.05, 12.0f, 21.0f);
-    EXPECT_NEAR(DecodePvtKp(*motor1_message), refreshed_kp.motor1, 0.15f);
-    EXPECT_NEAR(DecodePvtKp(*motor2_message), refreshed_kp.motor2, 0.15f);
-}
-
 TEST(DoubleCoupleJointPVTControlTest, FeedbackDoesNotOverwritePendingFirstAxisTarget) {
     const auto ranges = CreateMotorRanges();
     auto fixture = CreatePairedDoubleCoupleFixture("pvt_pending_feedback_adapter", ranges);
@@ -3206,18 +3201,101 @@ TEST(DoubleCoupleJointPVTControlTest, TorqueModeComputesPositionTorqueAndDelegat
     const auto& messages = fixture.adapter->GetCommandRecords();
     ASSERT_EQ(messages.size(), 2u);
     const auto kd = CalculateExpectedMotorGains(kActualRoll, kActualPitch, 0.5f, 0.75f);
-    const auto speed =
-        CalculateExpectedCombinedMotorSpeeds(kActualRoll, kActualPitch, 0.2f, -0.1f, ranges);
+    const auto damping = CalculateExpectedCombinedMotorTorques(kActualRoll, kActualPitch,
+                                                               0.5f * 0.2f, 0.75f * -0.1f, ranges);
     for (int id : {1, 2}) {
         const auto* message = FindSentMessage(messages, id);
         ASSERT_NE(message, nullptr);
         ASSERT_EQ(message->kind, FakeCommandKind::PVTControl);
         EXPECT_FLOAT_EQ(DecodePvtKp(*message), 0.0f);
         EXPECT_NEAR(DecodePvtKd(*message), std::max(0.1f, id == 1 ? kd.motor1 : kd.motor2), 0.01f);
-        EXPECT_NEAR(DecodePvtSpeed(*message, ranges), id == 1 ? speed.motor1 : speed.motor2, 0.01f);
+        EXPECT_NEAR(DecodePvtSpeed(*message, ranges),
+                    (id == 1 ? damping.motor1 : damping.motor2) /
+                        std::max(0.1f, id == 1 ? kd.motor1 : kd.motor2),
+                    0.01f);
         EXPECT_NEAR(DecodePvtTorque(*message, ranges), id == 1 ? expected.motor1 : expected.motor2,
                     0.02f);
     }
+}
+
+TEST(DoubleCoupleJointPVTControlTest, HostKpMotorKdMatchesFullJointLayerDamping) {
+    constexpr double kActualRoll = 0.2;
+    constexpr double kActualPitch = -0.15;
+    constexpr float kMotor1Speed = 0.3f;
+    constexpr float kMotor2Speed = -0.2f;
+    constexpr float kRollKp = 12.0f;
+    constexpr float kPitchKp = 21.0f;
+    constexpr float kRollKd = 0.8f;
+    constexpr float kPitchKd = 1.3f;
+    constexpr float kTargetRoll = 0.05f;
+    constexpr float kTargetPitch = -0.04f;
+    constexpr float kTargetRollSpeed = 0.3f;
+    constexpr float kTargetPitchSpeed = -0.2f;
+    const auto ranges = CreateMotorRanges();
+
+    for (const auto mode : {PVTControlMode::HostKpMotorKd}) {
+        auto fixture = CreatePairedDoubleCoupleFixture(
+            "pvt_new_coupled_mode_" + std::to_string(static_cast<int>(mode)), ranges);
+        const auto actual_positions = CalculateExpectedMotorPositions(kActualRoll, kActualPitch);
+        EmitMotor1Feedback(fixture, actual_positions.motor1, kMotor1Speed);
+        EmitMotor2Feedback(fixture, actual_positions.motor2, kMotor2Speed);
+
+        fixture.master->PVTControl(kRollKp, kRollKd, kTargetRoll, kTargetRollSpeed, 0.0f, mode);
+        fixture.slave->PVTControl(kPitchKp, kPitchKd, kTargetPitch, kTargetPitchSpeed, 0.0f, mode);
+
+        const auto& messages = fixture.adapter->GetCommandRecords();
+        ASSERT_EQ(messages.size(), 2u);
+        const auto* motor1_message = FindSentMessage(messages, 1);
+        const auto* motor2_message = FindSentMessage(messages, 2);
+        ASSERT_NE(motor1_message, nullptr);
+        ASSERT_NE(motor2_message, nullptr);
+        ASSERT_EQ(motor1_message->kind, FakeCommandKind::PVTControl);
+        ASSERT_EQ(motor2_message->kind, FakeCommandKind::PVTControl);
+
+        couple_joint::MechanismSolver solver(CreateValidCalibrationInput());
+        ASSERT_TRUE(solver.SolveInverse(kActualRoll, kActualPitch).status ==
+                        couple_joint::SolveStatus::Success ||
+                    solver.GetTransmission().near_singular);
+        const auto actual_velocity = solver.SolveForwardVelocity(kMotor1Speed, kMotor2Speed);
+        const auto& jacobian = actual_velocity.transmission.velocity_jacobian;
+        const float motor1_kd =
+            std::max(0.1f, static_cast<float>(jacobian.m00 * jacobian.m00 * kRollKd +
+                                              jacobian.m10 * jacobian.m10 * kPitchKd));
+        const float motor2_kd =
+            std::max(0.1f, static_cast<float>(jacobian.m01 * jacobian.m01 * kRollKd +
+                                              jacobian.m11 * jacobian.m11 * kPitchKd));
+        const auto kp_torque = solver.SolveInverseTorque(kRollKp * (kTargetRoll - kActualRoll),
+                                                         kPitchKp * (kTargetPitch - kActualPitch));
+        const auto kd_torque =
+            solver.SolveInverseTorque(kRollKd * (kTargetRollSpeed - actual_velocity.roll),
+                                      kPitchKd * (kTargetPitchSpeed - actual_velocity.pitch));
+        const float expected_speed1 =
+            kMotor1Speed + static_cast<float>(kd_torque.theta1 / motor1_kd);
+        const float expected_speed2 =
+            kMotor2Speed + static_cast<float>(kd_torque.theta2 / motor2_kd);
+        EXPECT_NEAR(DecodePvtSpeed(*motor1_message, ranges), expected_speed1, 0.02f);
+        EXPECT_NEAR(DecodePvtSpeed(*motor2_message, ranges), expected_speed2, 0.02f);
+        EXPECT_FLOAT_EQ(DecodePvtKp(*motor1_message), 0.0f);
+        EXPECT_FLOAT_EQ(DecodePvtKp(*motor2_message), 0.0f);
+        EXPECT_NEAR(DecodePvtKd(*motor1_message), motor1_kd, 0.01f);
+        EXPECT_NEAR(DecodePvtKd(*motor2_message), motor2_kd, 0.01f);
+        EXPECT_NEAR(DecodePvtTorque(*motor1_message, ranges), kp_torque.theta1, 0.02f);
+        EXPECT_NEAR(DecodePvtTorque(*motor2_message, ranges), kp_torque.theta2, 0.02f);
+        EXPECT_NEAR(DecodePvtPosition(*motor1_message, ranges), actual_positions.motor1, 0.01f);
+        EXPECT_NEAR(DecodePvtPosition(*motor2_message, ranges), actual_positions.motor2, 0.01f);
+    }
+}
+
+TEST(DoubleCoupleJointPVTControlTest, HostKpMotorKdRejectsCompensatedSpeedOutsideProtocolRange) {
+    auto ranges = CreateMotorRanges();
+    ranges.speed = {-0.1f, 0.1f};
+    auto fixture = CreatePairedDoubleCoupleFixture("coupled_damping_speed_limit", ranges);
+    const auto actual = CalculateExpectedMotorPositions(0, 0);
+    EmitDoubleCoupleFeedback(fixture, actual);
+    fixture.master->PVTControl(0, 1, 0, 1, 0, PVTControlMode::HostKpMotorKd);
+    EXPECT_THROW(fixture.slave->PVTControl(0, 1, 0, 0, 0, PVTControlMode::HostKpMotorKd),
+                 JointException);
+    ExpectPositionHoldMessages(fixture.adapter->GetCommandRecords(), actual, ranges);
 }
 
 TEST(DoubleCoupleJointPVTControlTest, HostTorqueComputesBothFeedbackTermsAndSendsTorqueFrames) {
@@ -3253,29 +3331,22 @@ TEST(DoubleCoupleJointPVTControlTest, HostTorqueComputesBothFeedbackTermsAndSend
     }
 }
 
-TEST(DoubleCoupleJointPVTControlTest, HostTorqueClampsTotalPdTorque) {
-    auto fixture = CreatePairedDoubleCoupleFixture("host_total_torque_limit", CreateMotorRanges());
-    EmitDoubleCoupleFeedback(fixture, CalculateExpectedMotorPositions(0, 0));
+TEST(DoubleCoupleJointPVTControlTest, HostTorqueRejectsTotalPdTorqueOverflow) {
+    const auto ranges = CreateMotorRanges();
+    auto fixture = CreatePairedDoubleCoupleFixture("host_total_torque_limit", ranges);
+    const auto actual = CalculateExpectedMotorPositions(0, 0);
+    EmitDoubleCoupleFeedback(fixture, actual);
     fixture.master->PVTControl(0, 100, 0, 2, 0, PVTControlMode::HostTorque);
-    fixture.slave->PVTControl(0, 100, 0, 0, 0, PVTControlMode::HostTorque);
-    const auto records = fixture.adapter->GetCommandRecords();
-    ASSERT_EQ(records.size(), 2u);
-    for (const auto& record : records)
-        ASSERT_EQ(record.kind, FakeCommandKind::TorControl);
-    couple_joint::MechanismSolver solver(CreateValidCalibrationInput());
-    solver.SolveInverse(0, 0);
-    const auto torque =
-        solver.SolveForwardTorque(DecodeTorqueCommand(*FindSentMessage(records, 1)),
-                                  DecodeTorqueCommand(*FindSentMessage(records, 2)));
-    EXPECT_NEAR(torque.roll, 3, 0.03);
-    EXPECT_LE(std::abs(torque.pitch), 3.03);
+    EXPECT_THROW(fixture.slave->PVTControl(0, 100, 0, 0, 0, PVTControlMode::HostTorque),
+                 JointException);
+    ExpectPositionHoldMessages(fixture.adapter->GetCommandRecords(), actual, ranges);
 }
 
 TEST(DoubleCoupleJointPVTControlTest, PairedModesMustMatchForHostControl) {
-    for (auto first :
-         {PVTControlMode::MotorPVT, PVTControlMode::HostTorque, PVTControlMode::HostKpMotorKd}) {
-        for (auto second : {PVTControlMode::MotorPVT, PVTControlMode::HostTorque,
-                            PVTControlMode::HostKpMotorKd}) {
+    const auto modes = {PVTControlMode::MotorPVT, PVTControlMode::HostTorque,
+                        PVTControlMode::HostKpMotorKd};
+    for (auto first : modes) {
+        for (auto second : modes) {
             auto fixture = CreatePairedDoubleCoupleFixture(
                 "paired_modes_" + std::to_string(int(first)) + std::to_string(int(second)),
                 CreateMotorRanges());
@@ -3334,7 +3405,7 @@ TEST(DoubleCoupleJointPVTControlTest, HostTorquePreservesLimitAndSingularityProt
 }
 
 TEST(DoubleCoupleJointPVTControlTest, InvalidModeCancelsPendingBatch) {
-    for (int invalid : {-1, 3}) {
+    for (int invalid : {-1, 3, 4, 5, 6}) {
         const auto ranges = CreateMotorRanges();
         auto fixture = CreatePairedDoubleCoupleFixture("invalid_pvt_mode", ranges);
         const auto actual = CalculateExpectedMotorPositions(0, 0);
@@ -3404,6 +3475,8 @@ TEST(DoubleCoupleJointProtectionTest, RelativeMotorAnglesDoNotJumpAcrossSolverPi
         ASSERT_TRUE(pitch.has_value());
         // 不可执行目标触发批次起点保持，起点必须保留原电机相对角而非 ±2π 跳圈。
         fixture.master->PosControl(3.0f, 1.0f, 1.0f);
+        EXPECT_TRUE(fixture.adapter->GetCommandRecords().empty());
+        fixture.master->PosControl(3.0f, 1.0f, 1.0f);
         const auto& hold = fixture.adapter->GetCommandRecords();
         ASSERT_EQ(hold.size(), 2u);
         for (int id : {1, 2}) {
@@ -3418,6 +3491,7 @@ TEST(DoubleCoupleJointProtectionTest, RelativeMotorAnglesDoNotJumpAcrossSolverPi
 }
 
 #if ENCOS_ENABLE_SPDLOG
+
 TEST(JointProtectionLogTest, ManagerLoggerReceivesWarningsFromEveryJointTypeAndControlMode) {
     std::ostringstream output;
     const std::string logger_name = "joint_protection_test";
@@ -3478,8 +3552,8 @@ TEST(JointProtectionLogTest, ManagerLoggerReceivesWarningsFromEveryJointTypeAndC
     }
     // 幅值限幅是电平型保护：每个错误点只在进入保护时输出一条告警，重复调用不再复述。
     // 闭合链动态控制按合帧下发，需要另一轴各补一次调用才会联合映射并产生限幅告警
-    const std::vector<std::pair<BaseJointPtr, BaseJointPtr>> clamped_calls{
-        {rjoint, nullptr}, {cjoint, nullptr}, {master, slave}};
+    const std::vector<std::pair<BaseJointPtr, BaseJointPtr>> clamped_calls{{rjoint, nullptr},
+                                                                           {cjoint, nullptr}};
     for (const auto& [joint, companion] : clamped_calls) {
         const std::vector<std::pair<std::function<void()>, std::function<void()>>> calls{
             {[&] {
@@ -3521,15 +3595,12 @@ TEST(JointProtectionLogTest, ManagerLoggerReceivesWarningsFromEveryJointTypeAndC
         }
     }
 
-    // slave 的所有调用都转发进同一个 MasterJoint，主从共用同一张保护标志位表
-    // slave 的调用会转发进同一个 MasterJoint（主从共用一张标志位表），两条轴各自持有
-    // 独立的标志位：两轴都进入限幅保护后，从任一对象重复同样的超限命令都不再输出
-    master->SpdControl(1000);
-    slave->SpdControl(1000);
-    const auto before_shared_repeat = output.str().size();
-    master->SpdControl(1000);
-    slave->SpdControl(1000);
-    EXPECT_EQ(output.str().size(), before_shared_repeat);
+    // 耦合关节越界输入明确拒绝，并报告调用模式与原因。
+    for (const auto& joint : {master, slave}) {
+        const auto before = output.str().size();
+        EXPECT_THROW(joint->SpdControl(1000), std::invalid_argument);
+        EXPECT_NE(output.str().substr(before).find("invalid dynamic input"), std::string::npos);
+    }
     spdlog::drop(logger_name);
 }
 
@@ -3742,7 +3813,7 @@ TEST(DoubleCoupleJointPositionControlTest, BatchesTwoAxisPositionControlsIntoFin
     fixture.master->PosControl(0.04f, 1.0f, 0.5f);
     EXPECT_TRUE(fixture.adapter->GetCommandRecords().empty());
 
-    fixture.master->PosControlForSlave(-0.03f, 1.0f, 0.5f, 1);
+    fixture.slave->PosControl(-0.03f, 1.0f, 0.5f, 1);
 
     const auto& messages = fixture.adapter->GetCommandRecords();
     ASSERT_EQ(messages.size(), 2u);
@@ -3872,8 +3943,7 @@ TEST(DoubleCoupleJointPVTControlTest, ProtectedHostTorqueTargetDoesNotSeedNextBa
     fixture.slave->PVTControl(10.0f, 0.0f, 0.0f, 0.0f, 0.0f, PVTControlMode::HostKpMotorKd);
     fixture.slave->PVTControl(10.0f, 0.0f, 0.0f, 0.0f, 0.0f, PVTControlMode::HostKpMotorKd);
 
-    const auto expected =
-        CalculateExpectedCombinedMotorTorques(kActualRoll, 0.0, -0.9, 0.0, ranges);
+    const auto expected = CalculateExpectedCombinedMotorTorques(kActualRoll, 0.0, 0.0, 0.0, ranges);
     ExpectPvtTorqueCommands(fixture.adapter->GetCommandRecords(), expected.motor1, expected.motor2,
                             ranges);
 }
@@ -3945,7 +4015,7 @@ TEST(DoubleCoupleJointPVTControlTest, ActualNearSingularPoseAllowsExitingBothPvt
         fixture.adapter->ClearCommandRecords();
 
         fixture.master->PVTControl(
-            10.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+            4.0f, 1.0f, 0.0f, 0.0f, 0.0f,
             (torque_mode ? PVTControlMode::HostKpMotorKd : PVTControlMode::MotorPVT));
         fixture.slave->PVTControl(
             10.0f, 1.0f, -0.14f, 0.2f, 0.0f,
@@ -3953,7 +4023,7 @@ TEST(DoubleCoupleJointPVTControlTest, ActualNearSingularPoseAllowsExitingBothPvt
 
         if (torque_mode) {
             const auto expected = CalculateExpectedCombinedMotorTorques(kCurrentRoll, kCurrentPitch,
-                                                                        3.0, 0.1, ranges);
+                                                                        2.0, 0.1, ranges);
             ExpectPvtTorqueCommands(fixture.adapter->GetCommandRecords(), expected.motor1,
                                     expected.motor2, ranges);
         } else {
@@ -3978,15 +4048,17 @@ TEST(DoubleCoupleJointPVTControlTest, PVTRejectsTargetOutsideProtocolPositionRan
 
     // 协议范围不足以容纳两侧各 2° 内缩，不能安全位控，回退制动。
     EXPECT_NO_THROW(fixture.master->PVTControl(10.0f, 1.0f, 0.05f, 0.4f, 0.5f));
+    EXPECT_TRUE(fixture.adapter->GetCommandRecords().empty());
+    EXPECT_NO_THROW(fixture.master->PVTControl(10.0f, 1.0f, 0.05f, 0.4f, 0.5f));
     ExpectStopMessagesWithZeroCurrent(fixture.adapter->GetCommandRecords(), 2u);
 }
 
-TEST(DoubleCoupleJointPVTControlTest, PVTUniformlyLimitsMotorSpeedAndTorqueRange) {
+TEST(DoubleCoupleJointPVTControlTest, PVTDelegatesIndependentMotorSaturationToDriver) {
     const auto ranges = CreateMotorRanges(12.5f, 0.2f, 0.2f, 30.0f);
     auto fixture = CreatePairedDoubleCoupleFixture("pvt_speed_torque_limit_adapter", ranges);
 
     fixture.master->PVTControl(10.0f, 1.0f, 0.0f, 2.0f, 3.0f);
-    fixture.master->PVTControl(10.0f, 1.0f, 0.0f, 2.0f, 3.0f);
+    fixture.slave->PVTControl(10.0f, 1.0f, 0.0f, 0.5f, 0.5f);
 
     const auto& messages = fixture.adapter->GetCommandRecords();
     ASSERT_EQ(messages.size(), 2u);
@@ -3995,10 +4067,16 @@ TEST(DoubleCoupleJointPVTControlTest, PVTUniformlyLimitsMotorSpeedAndTorqueRange
     ASSERT_NE(motor1_message, nullptr);
     ASSERT_NE(motor2_message, nullptr);
 
-    const auto expected_speeds =
-        CalculateExpectedMotorSpeeds(DoubleCoupleJointAxis::Roll, 0.0, 0.0, 2.0f, ranges);
-    const auto expected_torques =
-        CalculateExpectedMotorTorques(DoubleCoupleJointAxis::Roll, 0.0, 0.0, 3.0f, ranges);
+    couple_joint::MechanismSolver solver(CreateValidCalibrationInput());
+    solver.SolveInverse(0.0, 0.0);
+    const auto speeds = solver.SolveInverseVelocity(2.0, 0.5);
+    const auto torques = solver.SolveInverseTorque(3.0, 0.5);
+    const ExpectedMotorValues expected_speeds{
+        std::clamp(static_cast<float>(speeds.theta1), ranges.speed.min, ranges.speed.max),
+        std::clamp(static_cast<float>(speeds.theta2), ranges.speed.min, ranges.speed.max)};
+    const ExpectedMotorValues expected_torques{
+        std::clamp(static_cast<float>(torques.theta1), ranges.torque.min, ranges.torque.max),
+        std::clamp(static_cast<float>(torques.theta2), ranges.torque.min, ranges.torque.max)};
     const float motor1_speed = DecodePvtSpeed(*motor1_message, ranges);
     const float motor2_speed = DecodePvtSpeed(*motor2_message, ranges);
     const float motor1_torque = DecodePvtTorque(*motor1_message, ranges);
@@ -4019,7 +4097,7 @@ TEST(DoubleCoupleJointControlCacheTest, PosControlUpdatesCachedTargetForLaterPvt
 
     fixture.master->PosControl(0.04f, 1.0f, 0.5f);
     fixture.adapter->ClearCommandRecords();
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
+    fixture.slave->PVTControl(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
 
     const auto& messages = fixture.adapter->GetCommandRecords();
     ASSERT_EQ(messages.size(), 2u);
@@ -4106,6 +4184,8 @@ TEST(DoubleCoupleJointPositionControlTest, PosControlRejectsNearSingularTargetWi
     fixture.master->PosControl(static_cast<float>(kCurrentRoll), 1.0f, 0.5f);
     fixture.adapter->ClearCommandRecords();
     fixture.slave->PosControl(static_cast<float>(kNearSingularPitch), 1.0f, 0.5f);
+    EXPECT_TRUE(fixture.adapter->GetCommandRecords().empty());
+    fixture.slave->PosControl(static_cast<float>(kNearSingularPitch), 1.0f, 0.5f);
 
     ExpectPositionHoldMessages(fixture.adapter->GetCommandRecords(),
                                CalculateExpectedMotorPositions(kCurrentRoll, 0.0), ranges);
@@ -4128,6 +4208,8 @@ TEST(DoubleCoupleJointPositionControlTest,
 
     fixture.adapter->ClearCommandRecords();
     fixture.slave->PosControl(static_cast<float>(kNearSingularPitch), 1.0f, 0.5f);
+    EXPECT_TRUE(fixture.adapter->GetCommandRecords().empty());
+    fixture.slave->PosControl(static_cast<float>(kNearSingularPitch), 1.0f, 0.5f);
     ExpectPositionHoldMessages(fixture.adapter->GetCommandRecords(), latched_hold_positions,
                                ranges);
 
@@ -4138,6 +4220,8 @@ TEST(DoubleCoupleJointPositionControlTest,
     EXPECT_NEAR(feedback_status->pos, static_cast<float>(kFeedbackPitch), 0.002f);
 
     fixture.adapter->ClearCommandRecords();
+    fixture.slave->PosControl(static_cast<float>(kNearSingularPitch), 1.0f, 0.5f);
+    EXPECT_TRUE(fixture.adapter->GetCommandRecords().empty());
     fixture.slave->PosControl(static_cast<float>(kNearSingularPitch), 1.0f, 0.5f);
     ExpectPositionHoldMessages(fixture.adapter->GetCommandRecords(), latched_hold_positions,
                                ranges);
@@ -4264,6 +4348,8 @@ TEST(DoubleCoupleJointMotorLimitTest, MissingMotorLimitsFallBackToMotorPvtPositi
     EmitDoubleCoupleFeedback(fixture, zero_positions);
 
     EXPECT_NO_THROW(fixture.master->PVTControl(10.0f, 1.0f, 0.05f, 0.4f, 0.5f));
+    EXPECT_TRUE(fixture.adapter->GetCommandRecords().empty());
+    EXPECT_NO_THROW(fixture.master->PVTControl(10.0f, 1.0f, 0.05f, 0.4f, 0.5f));
 
     ExpectStopMessagesWithZeroCurrent(fixture.adapter->GetCommandRecords(), 2u);
 }
@@ -4356,7 +4442,11 @@ TEST(DoubleCoupleJointMotorLimitTest, ActualMotorLimitStopsOutwardAndAllowsInwar
         auto inward = CreatePairedDoubleCoupleFixture(
             torque_mode ? "pvt_actual_motor_exit_torque_mode" : "pvt_actual_motor_exit", ranges,
             false, false, motor1_limit, std::nullopt);
-        EmitDoubleCoupleFeedback(inward, actual_positions);
+        // 零 Kd 的耦合模式将目标速度设为反馈速度；明确注入向内速度，
+        // 避免协议将零速度量化成微小向外速度而触发方向保护。
+        const float inward_speed =
+            outward_positions.motor1 > actual_positions.motor1 ? -0.1f : 0.1f;
+        EmitDoubleCoupleFeedback(inward, actual_positions, inward_speed);
         inward.adapter->ClearCommandRecords();
         inward.master->PVTControl(
             10.0f, 0.0f, 0.0f, 0.0f, 0.0f,
@@ -4406,24 +4496,14 @@ TEST(DoubleCoupleJointMotorLimitTest, OverlappingNarrowLimitZonesProtectBothDire
     }
 }
 
-TEST(DoubleCoupleJointPositionControlTest, PosControlClampsJointTargetWithSlack) {
+TEST(DoubleCoupleJointPositionControlTest, PosControlRejectsJointTargetOutsideSlack) {
     const auto ranges = CreateMotorRanges();
     const Range<float> master_limit{-0.1f, 0.1f};
     auto fixture = CreatePairedDoubleCoupleFixture("pos_joint_limit_slack", ranges, false, false,
                                                    std::nullopt, std::nullopt, master_limit);
 
-    fixture.master->PosControl(0.2f, 1.0f, 0.5f);
-    fixture.master->PosControl(0.2f, 1.0f, 0.5f);
-
-    const auto expected = CalculateExpectedMotorPositions(master_limit.max - kLimitSlack, 0.0);
-    const auto& messages = fixture.adapter->GetCommandRecords();
-    ASSERT_EQ(messages.size(), 2u);
-    const auto* motor1_message = FindSentMessage(messages, 1);
-    const auto* motor2_message = FindSentMessage(messages, 2);
-    ASSERT_NE(motor1_message, nullptr);
-    ASSERT_NE(motor2_message, nullptr);
-    EXPECT_NEAR(DecodePosPosition(*motor1_message), expected.motor1, 0.002f);
-    EXPECT_NEAR(DecodePosPosition(*motor2_message), expected.motor2, 0.002f);
+    EXPECT_THROW(fixture.master->PosControl(0.2f, 1.0f, 0.5f), std::invalid_argument);
+    ExpectStopMessagesWithZeroCurrent(fixture.adapter->GetCommandRecords(), 2u);
 }
 
 TEST(DoubleCoupleJointDynamicLimitTest, MasterDynamicControlsStopAtJointLimit) {
@@ -4522,11 +4602,11 @@ TEST(DoubleCoupleJointDynamicLimitTest, ExitingNearSingularDirectionIsAllowed) {
     EXPECT_NEAR(status->pos, static_cast<float>(kCurrentPitch), 0.002f);
     fixture.adapter->ClearCommandRecords();
 
-    fixture.slave->SpdControl(1.0f, 0.5f);
+    fixture.slave->SpdControl(0.01f, 0.5f);
     fixture.master->SpdControl(0.0f, 0.5f);
 
     const auto expected = CalculateExpectedMotorSpeeds(DoubleCoupleJointAxis::Pitch, kCurrentRoll,
-                                                       kCurrentPitch, 1.0f, ranges);
+                                                       kCurrentPitch, 0.01f, ranges);
     ExpectSpeedCommands(fixture.adapter->GetCommandRecords(), expected.motor1, expected.motor2,
                         0.006f);
 }
@@ -4545,6 +4625,8 @@ TEST(DoubleCoupleJointDynamicLimitTest, EnteringNearSingularDirectionHoldsCurren
     fixture.adapter->ClearCommandRecords();
 
     fixture.slave->SpdControl(-1.0f, 0.5f);
+    EXPECT_TRUE(fixture.adapter->GetCommandRecords().empty());
+    fixture.master->SpdControl(0.0f, 0.5f);
 
     ExpectPositionHoldMessages(fixture.adapter->GetCommandRecords(), current_positions, ranges);
 }
@@ -4703,8 +4785,8 @@ TEST(DoubleCoupleJointDynamicBatchTest, DynamicControlDiscardsPendingPositionHal
     EXPECT_TRUE(fixture.adapter->GetCommandRecords().empty());
 
     fixture.slave->SpdControl(0.5f, 0.5f);
-    // 被丢弃的位置半帧已把目标位姿提交到 0.05，联合映射在目标位姿上进行
-    const auto expected = CalculateExpectedCombinedMotorSpeeds(0.05, 0.0, 1.0f, 0.5f, ranges);
+    // 被丢弃的位置半帧不修改已提交目标，映射仍在原位姿进行
+    const auto expected = CalculateExpectedCombinedMotorSpeeds(0.0, 0.0, 1.0f, 0.5f, ranges);
     ExpectSpeedCommands(fixture.adapter->GetCommandRecords(), expected.motor1, expected.motor2,
                         0.006f);
 }
@@ -4733,8 +4815,8 @@ TEST(DoubleCoupleJointControlCacheTest, SpdControlWithoutFeedbackKeepsCachedTarg
 
     fixture.master->SpdControl(1.0f, 0.5f);
     fixture.adapter->ClearCommandRecords();
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
+    fixture.slave->PVTControl(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
+    fixture.slave->PVTControl(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
 
     const auto& messages = fixture.adapter->GetCommandRecords();
     ASSERT_EQ(messages.size(), 2u);
@@ -4753,8 +4835,8 @@ TEST(DoubleCoupleJointControlCacheTest, TorControlWithoutFeedbackKeepsCachedTarg
 
     fixture.master->TorControl(1.0f);
     fixture.adapter->ClearCommandRecords();
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
+    fixture.slave->PVTControl(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
+    fixture.slave->PVTControl(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
 
     const auto& messages = fixture.adapter->GetCommandRecords();
     ASSERT_EQ(messages.size(), 2u);
@@ -4767,56 +4849,30 @@ TEST(DoubleCoupleJointControlCacheTest, TorControlWithoutFeedbackKeepsCachedTarg
     EXPECT_NEAR(DecodePvtPosition(*motor2_message, ranges), expected.motor2, 0.002f);
 }
 
-TEST(DoubleCoupleJointControlCacheTest, SpdControlUniformlyLimitsMotorSpeedRange) {
+TEST(DoubleCoupleJointControlCacheTest, SpdControlRejectsExcessiveMotorSpeedRange) {
     const auto ranges = CreateMotorRanges(12.5f, 0.2f, 30.0f, 30.0f);
     auto fixture = CreatePairedDoubleCoupleFixture("speed_limit_adapter", ranges);
 
     fixture.master->SpdControl(2.0f, 0.5f);
-    fixture.slave->SpdControl(0.0f, 0.5f);
+    EXPECT_THROW(fixture.slave->SpdControl(0.0f, 0.5f), JointException);
 
-    const auto& messages = fixture.adapter->GetCommandRecords();
-    ASSERT_EQ(messages.size(), 2u);
-    const auto* motor1_message = FindSentMessage(messages, 1);
-    const auto* motor2_message = FindSentMessage(messages, 2);
-    ASSERT_NE(motor1_message, nullptr);
-    ASSERT_NE(motor2_message, nullptr);
-    EXPECT_EQ(motor1_message->kind, FakeCommandKind::SpdControl);
-    EXPECT_EQ(motor2_message->kind, FakeCommandKind::SpdControl);
-
-    const auto expected =
-        CalculateExpectedMotorSpeeds(DoubleCoupleJointAxis::Roll, 0.0, 0.0, 2.0f, ranges);
-    const float motor1_speed = DecodeSpeedCommand(*motor1_message);
-    const float motor2_speed = DecodeSpeedCommand(*motor2_message);
-    EXPECT_NEAR(motor1_speed, expected.motor1, 0.001f);
-    EXPECT_NEAR(motor2_speed, expected.motor2, 0.001f);
-    EXPECT_LE(std::abs(motor1_speed), ranges.speed.max + 0.001f);
-    EXPECT_LE(std::abs(motor2_speed), ranges.speed.max + 0.001f);
+    const auto records = fixture.adapter->GetCommandRecords();
+    ASSERT_EQ(records.size(), 2u);
+    for (const auto& record : records)
+        EXPECT_EQ(record.kind, FakeCommandKind::PosControl);
 }
 
-TEST(DoubleCoupleJointControlCacheTest, TorControlUniformlyLimitsMotorTorqueRange) {
+TEST(DoubleCoupleJointControlCacheTest, TorControlRejectsExcessiveMotorTorqueRange) {
     const auto ranges = CreateMotorRanges(12.5f, 18.0f, 0.2f, 30.0f);
     auto fixture = CreatePairedDoubleCoupleFixture("torque_limit_adapter", ranges);
 
     fixture.master->TorControl(3.0f);
-    fixture.slave->TorControl(0.0f);
+    EXPECT_THROW(fixture.slave->TorControl(0.0f), JointException);
 
-    const auto& messages = fixture.adapter->GetCommandRecords();
-    ASSERT_EQ(messages.size(), 2u);
-    const auto* motor1_message = FindSentMessage(messages, 1);
-    const auto* motor2_message = FindSentMessage(messages, 2);
-    ASSERT_NE(motor1_message, nullptr);
-    ASSERT_NE(motor2_message, nullptr);
-    EXPECT_EQ(motor1_message->kind, FakeCommandKind::TorControl);
-    EXPECT_EQ(motor2_message->kind, FakeCommandKind::TorControl);
-
-    const auto expected =
-        CalculateExpectedMotorTorques(DoubleCoupleJointAxis::Roll, 0.0, 0.0, 3.0f, ranges);
-    const float motor1_torque = DecodeTorqueCommand(*motor1_message);
-    const float motor2_torque = DecodeTorqueCommand(*motor2_message);
-    EXPECT_NEAR(motor1_torque, expected.motor1, 0.02f);
-    EXPECT_NEAR(motor2_torque, expected.motor2, 0.02f);
-    EXPECT_LE(std::abs(motor1_torque), ranges.torque.max + 0.01f);
-    EXPECT_LE(std::abs(motor2_torque), ranges.torque.max + 0.01f);
+    const auto records = fixture.adapter->GetCommandRecords();
+    ASSERT_EQ(records.size(), 2u);
+    for (const auto& record : records)
+        EXPECT_EQ(record.kind, FakeCommandKind::PosControl);
 }
 
 TEST(DoubleCoupleJointControlCacheTest, CurControlWithoutFeedbackKeepsCachedTargetForLaterPvt) {
@@ -4825,8 +4881,8 @@ TEST(DoubleCoupleJointControlCacheTest, CurControlWithoutFeedbackKeepsCachedTarg
 
     fixture.master->CurControl(1.0f);
     fixture.adapter->ClearCommandRecords();
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
+    fixture.slave->PVTControl(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
+    fixture.slave->PVTControl(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
 
     const auto& messages = fixture.adapter->GetCommandRecords();
     ASSERT_EQ(messages.size(), 2u);
@@ -4923,8 +4979,8 @@ TEST(DoubleCoupleJointControlCacheTest, DynamicControlsRefreshCachedTargetFromMo
         action(fixture);
 
         fixture.adapter->ClearCommandRecords();
-        fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
-        fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
+        fixture.slave->PVTControl(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
+        fixture.slave->PVTControl(10.0f, 1.0f, -0.03f, 0.2f, 0.1f);
 
         const auto& slave_messages = fixture.adapter->GetCommandRecords();
         ASSERT_EQ(slave_messages.size(), 2u) << name;
@@ -4960,28 +5016,17 @@ TEST(DoubleCoupleJointControlCacheTest, DynamicControlsRefreshCachedTargetFromMo
     }
 }
 
-TEST(DoubleCoupleJointControlCacheTest, CurControlUniformlyLimitsMotorCurrentRange) {
+TEST(DoubleCoupleJointControlCacheTest, CurControlRejectsExcessiveMotorCurrentRange) {
     const auto ranges = CreateMotorRanges(12.5f, 18.0f, 30.0f, 0.2f);
     auto fixture = CreatePairedDoubleCoupleFixture("current_limit_adapter", ranges);
 
     fixture.master->CurControl(1.25f);
-    fixture.slave->CurControl(0.0f);
+    EXPECT_THROW(fixture.slave->CurControl(0.0f), JointException);
 
-    const auto& messages = fixture.adapter->GetCommandRecords();
-    ASSERT_EQ(messages.size(), 2u);
-    const auto* motor1_message = FindSentMessage(messages, 1);
-    const auto* motor2_message = FindSentMessage(messages, 2);
-    ASSERT_NE(motor1_message, nullptr);
-    ASSERT_NE(motor2_message, nullptr);
-
-    const auto expected =
-        CalculateExpectedMotorCurrents(DoubleCoupleJointAxis::Roll, 0.0, 0.0, 1.25f, ranges);
-    const float motor1_current = DecodeCurrentCommand(*motor1_message);
-    const float motor2_current = DecodeCurrentCommand(*motor2_message);
-    EXPECT_NEAR(motor1_current, expected.motor1, 0.02f);
-    EXPECT_NEAR(motor2_current, expected.motor2, 0.02f);
-    EXPECT_LE(std::abs(motor1_current), ranges.current.max + 0.01f);
-    EXPECT_LE(std::abs(motor2_current), ranges.current.max + 0.01f);
+    const auto records = fixture.adapter->GetCommandRecords();
+    ASSERT_EQ(records.size(), 2u);
+    for (const auto& record : records)
+        EXPECT_EQ(record.kind, FakeCommandKind::PosControl);
 }
 
 TEST(DoubleCoupleJointSafetyTest, RejectsNonFiniteControlInputsWithPositionHoldWhenFeedbackExists) {
@@ -5067,6 +5112,68 @@ TEST(DoubleCoupleJointSafetyTest, RejectsNonFiniteControlInputsWithStopWhenFeedb
             continue;
         }
         FAIL() << "Expected std::invalid_argument for non-finite input: " << name;
+    }
+}
+
+TEST(DoubleCoupleJointSafetyTest, InvalidInputDiscardsPendingPvtTargetAndGains) {
+    const auto ranges = CreateMotorRanges();
+    auto fixture = CreatePairedDoubleCoupleFixture("invalid_discards_pending", ranges);
+    fixture.master->PVTControl(100.0f, 2.0f, 0.08f, 0.0f, 0.0f);
+    EXPECT_THROW(
+        fixture.slave->PVTControl(1.0f, 1.0f, std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f),
+        std::invalid_argument);
+    fixture.adapter->ClearCommandRecords();
+    fixture.slave->PVTControl(0.0f, 0.0f, -0.03f, 0.0f, 0.0f);
+    EXPECT_TRUE(fixture.adapter->GetCommandRecords().empty());
+    fixture.slave->PVTControl(0.0f, 0.0f, -0.03f, 0.0f, 0.0f);
+    const auto records = fixture.adapter->GetCommandRecords();
+    ASSERT_EQ(records.size(), 2u);
+    const auto expected = CalculateExpectedMotorPositions(0.0, -0.03);
+    EXPECT_NEAR(DecodePvtPosition(*FindSentMessage(records, 1), ranges), expected.motor1, 0.002f);
+    EXPECT_NEAR(DecodePvtPosition(*FindSentMessage(records, 2), ranges), expected.motor2, 0.002f);
+    EXPECT_NEAR(DecodePvtKp(*FindSentMessage(records, 1)), 0.0f, 0.2f);
+    EXPECT_NEAR(DecodePvtKp(*FindSentMessage(records, 2)), 0.0f, 0.2f);
+}
+
+TEST(DoubleCoupleJointSafetyTest, RejectsUnencodableSpeedCurrentBeforeSendingEitherMotor) {
+    auto fixture =
+        CreatePairedDoubleCoupleFixture("unencodable_speed_current", CreateMotorRanges());
+    EXPECT_THROW(fixture.master->SpdControl(0.1f, 7000.0f), std::invalid_argument);
+    ExpectStopMessagesWithZeroCurrent(fixture.adapter->GetCommandRecords(), 2u);
+}
+
+TEST(DoubleCoupleJointSafetyTest, PositionChecksOtherAxisLimitInMixedPvtBatch) {
+    const auto ranges = CreateMotorRanges();
+    auto fixture =
+        CreatePairedDoubleCoupleFixture("mixed_position_joint_limit", ranges, false, false,
+                                        std::nullopt, std::nullopt, Range<float>{-0.1f, 0.1f});
+    fixture.master->PVTControl(1, 1, 0.2f, 0, 0);
+    EXPECT_TRUE(fixture.adapter->GetCommandRecords().empty());
+    fixture.slave->PosControl(0.0f);
+    ExpectPositionHoldMessages(fixture.adapter->GetCommandRecords(),
+                               CalculateExpectedMotorPositions(0.0, 0.0), ranges);
+}
+
+TEST(DoubleCoupleJointSafetyTest, PositionRejectsMappedMotorSpeedBeforeEitherMotorIsSent) {
+    auto fixture = CreatePairedDoubleCoupleFixture("position_motor_speed_range",
+                                                   CreateMotorRanges(12.5f, 0.01f));
+    fixture.master->PosControl(0.05f, 1.0f, 0.5f);
+    EXPECT_THROW(fixture.slave->PosControl(0.0f, 1.0f, 0.5f), JointException);
+    ExpectStopMessagesWithZeroCurrent(fixture.adapter->GetCommandRecords(), 2u);
+}
+
+TEST(DoubleCoupleJointSafetyTest, SpeedAndPositionRejectCurrentAboveJointTorqueLimit) {
+    for (const bool position : {false, true}) {
+        auto ranges = CreateMotorRanges();
+        ranges.kt = 2.0f;
+        auto fixture =
+            CreatePairedDoubleCoupleFixture("current_cap_" + std::to_string(position), ranges);
+        if (position) {
+            EXPECT_THROW(fixture.master->PosControl(0.05f, 1.0f, 2.0f), std::invalid_argument);
+        } else {
+            EXPECT_THROW(fixture.master->SpdControl(0.5f, 2.0f), std::invalid_argument);
+        }
+        ExpectStopMessagesWithZeroCurrent(fixture.adapter->GetCommandRecords(), 2u);
     }
 }
 
@@ -5237,15 +5344,15 @@ TEST(DoubleCoupleJointControlCacheTest, GetStatusUpdatesCachedTargetFromFeedback
     const auto zero_positions = CalculateExpectedMotorPositions(0.0, 0.0);
 
     fixture.master->PVTControl(10.0f, 1.0f, 0.3f, 0.3f, 0.2f);
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+    fixture.slave->PVTControl(10.0f, 1.0f, 0.0f, 0.0f, 0.0f);
     EmitDoubleCoupleFeedback(fixture, zero_positions);
     const auto status = fixture.master->GetStatus(false, 0);
     ASSERT_TRUE(status.has_value());
     EXPECT_NEAR(status->pos, 0.0f, 0.002f);
 
     fixture.adapter->ClearCommandRecords();
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.04f, 0.2f, 0.1f);
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.04f, 0.2f, 0.1f);
+    fixture.slave->PVTControl(10.0f, 1.0f, -0.04f, 0.2f, 0.1f);
+    fixture.slave->PVTControl(10.0f, 1.0f, -0.04f, 0.2f, 0.1f);
 
     const auto& messages = fixture.adapter->GetCommandRecords();
     ASSERT_EQ(messages.size(), 2u);
@@ -5266,7 +5373,7 @@ TEST(DoubleCoupleJointControlCacheTest, SetOnStatusUpdatesCachedTargetFromFeedba
     JointStatus callback_status{};
 
     fixture.master->PVTControl(10.0f, 1.0f, 0.05f, 0.3f, 0.2f);
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+    fixture.slave->PVTControl(10.0f, 1.0f, 0.0f, 0.0f, 0.0f);
     fixture.master->SetOnStatus([&](const JointStatus& status) {
         callback_called = true;
         callback_status = status;
@@ -5277,8 +5384,8 @@ TEST(DoubleCoupleJointControlCacheTest, SetOnStatusUpdatesCachedTargetFromFeedba
     EXPECT_NEAR(callback_status.pos, 0.0f, 0.002f);
 
     fixture.adapter->ClearCommandRecords();
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.04f, 0.2f, 0.1f);
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.04f, 0.2f, 0.1f);
+    fixture.slave->PVTControl(10.0f, 1.0f, -0.04f, 0.2f, 0.1f);
+    fixture.slave->PVTControl(10.0f, 1.0f, -0.04f, 0.2f, 0.1f);
 
     const auto& messages = fixture.adapter->GetCommandRecords();
     ASSERT_EQ(messages.size(), 2u);
@@ -5337,7 +5444,7 @@ TEST(DoubleCoupleJointControlCacheTest, IncompleteFeedbackDoesNotUpdateCachedTar
     EXPECT_FALSE(callback_called);
 
     fixture.adapter->ClearCommandRecords();
-    fixture.master->PVTControlForSlave(10.0f, 1.0f, -0.04f, 0.2f, 0.1f);
+    fixture.slave->PVTControl(10.0f, 1.0f, -0.04f, 0.2f, 0.1f);
 
     const auto& messages = fixture.adapter->GetCommandRecords();
     ASSERT_EQ(messages.size(), 2u);
@@ -5430,4 +5537,131 @@ TEST(JointManagerBaseTest, PosControlPropagatesUnhandledJointException) {
     const std::map<std::string, float> positions{{"pending_joint", 0.1f}};
 
     EXPECT_THROW(manager.PosControl(positions), JointException);
+}
+
+TEST_F(MakePairKeyTest, DistinguishesIndexFromNumericName) {
+    a.adapterId = std::uint32_t{0};
+    b.adapterId = std::uint32_t{0};
+    const auto indexed = DoubleCoupleJoint::MakePairKey(a, b);
+    a.adapterId = "0";
+    b.adapterId = "0";
+    EXPECT_NE(indexed, DoubleCoupleJoint::MakePairKey(a, b));
+}
+
+TEST_F(MakePairKeyTest, SeparatorsInNamesCannotShiftPairBoundary) {
+    a.adapterId = "x";
+    b.adapterId = "y/0/1|z";
+    const auto first = DoubleCoupleJoint::MakePairKey(a, b);
+    a.adapterId = "x/0/1|y";
+    b.adapterId = "z";
+    EXPECT_NE(first, DoubleCoupleJoint::MakePairKey(a, b));
+}
+
+TEST(JointManagerLogTest, NumericNameAndIndexTrackAndLogBothMotors) {
+    TemporaryDirectory directory;
+    TestableJointManager manager;
+    auto left = CreateFakeAdapterHarness("typed_left");
+    auto zero = CreateFakeAdapterHarness("typed_zero");
+    manager.TrackTestAdapter("left", left->Adapter());
+    manager.TrackTestAdapter("0", zero->Adapter());
+    RJoint::Config config{};
+    config.motorParams = MotorParams{std::uint32_t{0}, 0, 1, MotorInitParams{CreateMotorRanges()}};
+    config.limit = Range<float>{-1.0f, 1.0f};
+    config.maxSpd = 2.0f;
+    config.maxTor = 3.0f;
+    manager.AddJoint<RJoint>("indexed", config);
+    config.motorParams.adapterId = "0";
+    manager.AddJoint<RJoint>("named", config);
+    EXPECT_EQ(manager.TrackedMotorCount(), 2u);
+    manager.EnableLog(directory.Path());
+    EXPECT_TRUE(left->Adapter()->GetBus(0)->GetMotor(1)->IsLogged());
+    EXPECT_TRUE(zero->Adapter()->GetBus(0)->GetMotor(1)->IsLogged());
+    manager.DisableLog();
+    std::size_t files = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(directory.Path())) {
+        if (entry.is_regular_file())
+            ++files;
+    }
+    EXPECT_EQ(files, 9u);
+    EXPECT_TRUE(std::filesystem::exists(directory.Path() / "indexed_command.csv.zstd"));
+    EXPECT_TRUE(std::filesystem::exists(directory.Path() / "indexed_status.csv.zstd"));
+    EXPECT_TRUE(std::filesystem::exists(directory.Path() / "named_command.csv.zstd"));
+    EXPECT_TRUE(std::filesystem::exists(directory.Path() / "named_status.csv.zstd"));
+    EXPECT_TRUE(std::filesystem::exists(directory.Path() / "joint_protection.csv.zstd"));
+}
+
+TEST(DoubleCoupleJointDynamicBatchTest, DefaultCurrentPreservesExplicitLimit) {
+    for (bool position : {false, true}) {
+        for (bool same_axis : {false, true}) {
+            for (const auto limits : {std::pair{0.3f, 0.0f}, std::pair{0.0f, 0.3f},
+                                      std::pair{0.0f, 0.0f}, std::pair{0.8f, 0.3f}}) {
+                SCOPED_TRACE(::testing::Message() << position << "," << same_axis << ","
+                                                  << limits.first << "," << limits.second);
+                auto fixture = CreatePairedDoubleCoupleFixture("default_current_regression",
+                                                               CreateMotorRanges());
+                BaseJoint* second = same_axis ? static_cast<BaseJoint*>(fixture.master.get())
+                                              : static_cast<BaseJoint*>(fixture.slave.get());
+                if (position) {
+                    fixture.master->PosControl(0.01f, 1.0f, limits.first);
+                    second->PosControl(0.02f, 1.0f, limits.second);
+                } else {
+                    fixture.master->SpdControl(1.0f, limits.first);
+                    second->SpdControl(0.5f, limits.second);
+                }
+                // 同轴速度调用采用最新值；位置调用则合并本批次约束。
+                const float expected = same_axis && !position ? limits.second
+                                       : limits.first == 0.0f ? limits.second
+                                       : limits.second == 0.0f
+                                           ? limits.first
+                                           : std::min(limits.first, limits.second);
+                const auto& records = fixture.adapter->GetCommandRecords();
+                ASSERT_EQ(records.size(), 2u);
+                for (const auto& record : records) {
+                    const float actual =
+                        position ? std::get<FakePosControlPayload>(record.payload).current
+                                 : std::get<FakeSpdControlPayload>(record.payload).current;
+                    EXPECT_NEAR(actual, expected, 0.001f);
+                }
+            }
+        }
+    }
+}
+
+TEST(JointManagerPairingTest, NumericNameAndIndexPairIndependently) {
+    TestableJointManager manager;
+    auto left = CreateFakeAdapterHarness("pair_typed_left");
+    auto zero = CreateFakeAdapterHarness("pair_typed_zero");
+    manager.TrackTestAdapter("left", left->Adapter());
+    manager.TrackTestAdapter("0", zero->Adapter());
+    auto indexed =
+        CreateDoubleCoupleJointConfigWithRanges(DoubleCoupleJointAxis::Roll, CreateMotorRanges());
+    indexed.motorParams1.adapterId = std::uint32_t{0};
+    indexed.motorParams2.adapterId = std::uint32_t{0};
+    auto named = indexed;
+    named.motorParams1.adapterId = "0";
+    named.motorParams2.adapterId = "0";
+    ASSERT_NO_THROW(manager.AddJoint<DoubleCoupleJoint>("index_roll", indexed));
+    ASSERT_NO_THROW(manager.AddJoint<DoubleCoupleJoint>("name_roll", named));
+    left->SetReplyMode(FakeReplyMode::Automatic);
+    zero->SetReplyMode(FakeReplyMode::Automatic);
+    indexed.axis = named.axis = DoubleCoupleJointAxis::Pitch;
+    ASSERT_NO_THROW(manager.AddJoint<DoubleCoupleJoint>("index_pitch", indexed));
+    ASSERT_NO_THROW(manager.AddJoint<DoubleCoupleJoint>("name_pitch", named));
+    EXPECT_EQ(manager.TrackedMotorCount(), 4u);
+}
+
+TEST(DoubleCoupleJointDynamicBatchTest, OmittedCurrentPreservesCachedOtherAxisLimit) {
+    auto fixture = CreatePairedDoubleCoupleFixture("cached_default_limit", CreateMotorRanges());
+    fixture.slave->SpdControl(0.5f, 0.3f);
+    fixture.master->SpdControl(1.0f);
+    for (int batch = 0; batch < 2; ++batch) {
+        const auto& records = fixture.adapter->GetCommandRecords();
+        ASSERT_EQ(records.size(), 2u);
+        for (const auto& record : records) {
+            EXPECT_NEAR(std::get<FakeSpdControlPayload>(record.payload).current, 0.3f, 0.001f);
+        }
+        fixture.adapter->ClearCommandRecords();
+        fixture.master->SpdControl(0.8f);
+        fixture.master->SpdControl(0.6f);
+    }
 }

@@ -12,10 +12,9 @@
 #include <stdexcept>
 #include <string>
 
-#include <nlohmann/json.hpp>
-
 #include "BaseJoint.h"
 #include "JsonSchemaGenerator.h"
+#include "external/json.hpp"
 #include "mechanism_solver.h"
 
 namespace couple_joint {
@@ -154,8 +153,9 @@ public:
     /**
      * @brief 生成电机对配对键，用于 DoubleCoupleJoint 的 Master/Slave 配对。
      *
-     * 根据两个 MotorParams 生成格式为 "adapter/bus/motorId|adapter/bus/motorId"
-     * 的配对键。若两个 MotorParams 指向同一物理电机（adapterId 与合成总线索引
+     * 根据两个 MotorParams 生成格式为 "adapterKey/bus/motorId|adapterKey/bus/motorId"
+     * 的配对键，adapterKey 保留引用类型及名称长度。若两个 MotorParams 指向同一物理电机
+     * （adapterId 与合成总线索引
      * slaveId << 16 | busId、motorId 均相同），则返回空字符串以拒绝自身配对。
      *
      * @note adapterId 按取值比较：索引引用与名称引用即使解析到同一个适配器也判为
@@ -170,9 +170,9 @@ public:
         if (a.adapterId == b.adapterId && a.BusIndex() == b.BusIndex() && a.motorId == b.motorId) {
             return "";
         }
-        auto id_a = a.AdapterIdString() + "/" + std::to_string(a.BusIndex()) + "/" +
+        auto id_a = a.AdapterIdentityKey() + "/" + std::to_string(a.BusIndex()) + "/" +
                     std::to_string(a.motorId);
-        auto id_b = b.AdapterIdString() + "/" + std::to_string(b.BusIndex()) + "/" +
+        auto id_b = b.AdapterIdentityKey() + "/" + std::to_string(b.BusIndex()) + "/" +
                     std::to_string(b.motorId);
         return id_a + "|" + id_b;
     }

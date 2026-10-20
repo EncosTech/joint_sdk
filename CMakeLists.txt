@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 cmake_minimum_required(VERSION 3.20)
-project(joint_sdk VERSION 1.4.5 LANGUAGES CXX)
+project(joint_sdk VERSION 1.5.1 LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -21,10 +21,6 @@ endif()
 
 include(cmake/JointSdkMotorDriver.cmake)
 joint_sdk_resolve_motor_driver()
-
-if(NOT TARGET nlohmann_json::nlohmann_json)
-    find_package(nlohmann_json REQUIRED)
-endif()
 
 option(JOINT_SDK_BUILD_TESTS "Build joint_sdk tests" OFF)
 option(JOINT_SDK_BUILD_WASM_BINDINGS "Build joint_sdk Emscripten WASM bindings" OFF)
@@ -88,7 +84,6 @@ target_include_directories(joint_sdk INTERFACE
 target_link_libraries(joint_sdk INTERFACE
     $<BUILD_INTERFACE:Encos::encos_driver>
     $<INSTALL_INTERFACE:Encos::encos_driver>
-    nlohmann_json::nlohmann_json
     $<BUILD_INTERFACE:couple_joint::solver>
     $<INSTALL_INTERFACE:couple_joint::couple_joint_solver>
 )
@@ -182,7 +177,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(CPACK_DEBIAN_PACKAGE_SECTION "libdevel")
     set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
     set(CPACK_DEBIAN_PACKAGE_DEPENDS
-        "libencosdriver (>= 3.3.2), libeigen3-dev, nlohmann-json3-dev, libstdc++6, libc6")
+        "libencosdriver (>= 4.0.0), libeigen3-dev, libstdc++6, libc6")
     set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://encos.cn")
     set(CPACK_DEBIAN_PACKAGE_SHLIBS OFF)
 
@@ -222,6 +217,7 @@ if(JOINT_SDK_BUILD_WASM_BINDINGS)
     )
 
     target_compile_options(JointSDKWasm PRIVATE
+        "-Werror=deprecated-declarations"
         "-fexceptions"
     )
 
@@ -229,7 +225,6 @@ if(JOINT_SDK_BUILD_WASM_BINDINGS)
         joint_sdk::joint_sdk
         Encos::encos_driver
         FakeAdapterSupport
-        nlohmann_json::nlohmann_json
         couple_joint::solver
     )
 
@@ -263,6 +258,7 @@ if(JOINT_SDK_BUILD_TESTS)
     include(GoogleTest)
 
     add_executable(joint_sdk_tests
+        tests/brake_joint_test.cc
         tests/joint_framework_test.cc
         tests/zero_damping_joint_test.cc
     )
@@ -276,6 +272,10 @@ if(JOINT_SDK_BUILD_TESTS)
         joint_sdk::joint_sdk
         GTest::gtest_main
     )
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(joint_sdk_tests PRIVATE -Werror=deprecated-declarations)
+    endif()
 
     gtest_discover_tests(joint_sdk_tests)
 endif()

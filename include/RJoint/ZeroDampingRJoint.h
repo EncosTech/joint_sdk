@@ -116,42 +116,11 @@ public:
         joint_->Stop(mode, current, feedback);
     }
 
-    bool SetZero() override {
-        ThrowIfFaulted();
-        LatchStop();
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        return joint_->SetZero();
-    }
-
-    float GotoLimit(int dir, float spd = 2.0f, float cur = 2.0f,
-                    std::chrono::milliseconds timeout = std::chrono::milliseconds{5000}) override {
-        ThrowIfFaulted();
-        LatchStop();
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        return joint_->GotoLimit(dir, spd, cur, timeout);
-    }
-
-    bool GotoZero(float offset, float spd = 2.0f, float cur = 2.0f,
-                  std::chrono::milliseconds timeout = std::chrono::milliseconds{5000}) override {
-        ThrowIfFaulted();
-        LatchStop();
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        return joint_->GotoZero(offset, spd, cur, timeout);
-    }
-
     float PosAsOffset(int dir) override {
         ThrowIfFaulted();
         LatchStop();
         std::lock_guard<std::mutex> lock(operation_mutex_);
         return joint_->PosAsOffset(dir);
-    }
-
-    bool Calibrate(int dir, float spd = 2.0f, float cur = 2.0f,
-                   std::chrono::milliseconds timeout = std::chrono::milliseconds{5000}) override {
-        ThrowIfFaulted();
-        LatchStop();
-        std::lock_guard<std::mutex> lock(operation_mutex_);
-        return joint_->Calibrate(dir, spd, cur, timeout);
     }
 
     /**

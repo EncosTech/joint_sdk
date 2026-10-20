@@ -16,6 +16,8 @@ import {
   type JointWrapper,
 } from '@encos/joint-sdk'
 
+import { createDefaultHost } from '../../npm/src/host.js'
+
 const ADAPTER_NAME = 'fake_framework'
 const BUS_ID = 1
 
@@ -500,12 +502,9 @@ describe('ContinuousJoint runtime controls', () => {
     await expectEncosError(() => joint.pvtControl(1, 1, 0, 0, 0), 5, unsupported)
     await expectEncosError(() => joint.posControl(0), 5, unsupported)
     await expectEncosError(() => joint.setLimit({ min: -1, max: 1 }), 5, unsupported)
-    await expectEncosError(() => joint.gotoLimit(1, 1, 1, 100), 5, unsupported)
-    await expectEncosError(() => joint.gotoZero(0, 1, 1, 100), 5, unsupported)
     await expectEncosError(() => {
       joint.posAsOffset(1)
     }, 5, unsupported)
-    await expectEncosError(() => joint.calibrate(1, 1, 1, 100), 5, unsupported)
     expect(manager.fake!.getCommandCount()).toBe(0)
   })
 
@@ -740,12 +739,9 @@ describe('DoubleCoupleJoint pairing validation', () => {
     ).resolves.toBeDefined()
   })
 
-  it('pending slave unsupported helpers return NaN or false', async () => {
+  it('pending slave unsupported helpers return NaN', async () => {
     const slave = await manager.addJoint(dcJointDef('pending_pitch', 'pitch'))
-    expect(Number.isNaN(await slave.gotoLimit(1, 1, 1, 1000))).toBe(true)
-    expect(await slave.gotoZero(0, 1, 1, 1000)).toBe(false)
     expect(Number.isNaN(slave.posAsOffset(1))).toBe(true)
-    expect(await slave.calibrate(1, 1, 1, 1000)).toBe(false)
   })
 })
 
@@ -760,8 +756,6 @@ describe('DoubleCoupleJoint controls', () => {
     manager = await createManager(runtime)
     roll = await manager.addJoint(dcJointDef('dc_roll', 'roll'))
     pitch = await manager.addJoint(dcJointDef('dc_pitch', 'pitch'))
-    const ok = await roll.setZero()
-    expect(ok).toBe(true)
   })
 
   afterAll(() => {
@@ -772,7 +766,8 @@ describe('DoubleCoupleJoint controls', () => {
   it('PVT control sends one command per motor', async () => {
     manager.fake!.clearCommandRecords()
     await roll.pvtControl(10, 1, 0.05, 0.4, 0.5)
-    await roll.pvtControl(10, 1, 0.05, 0.4, 0.5)
+    expect(manager.fake!.getCommandCount()).toBe(0)
+    await pitch.pvtControl(10, 1, 0, 0, 0)
     expect(manager.fake!.getCommandCount()).toBe(2)
     const recs = manager.fake!.getCommandRecords()
     expect(recs.every((r) => r.kind === FakeCommandKind.PVTControl)).toBe(true)
@@ -846,7 +841,6 @@ describe('DoubleCoupleJoint controls', () => {
       const isolatedPitch = await isolatedManager.addJoint(
         dcJointDef('torque_mode_pitch', 'pitch', { adapterId }),
       )
-      expect(await isolatedRoll.setZero()).toBe(true)
       isolatedManager.fake!.injectFeedback(BUS_ID, 1, {
         position: 0,
         speed: 0,
@@ -909,18 +903,19 @@ describe('DoubleCoupleJoint limits and scaling', () => {
     const pitch = await manager.addJoint(
       dcJointDef('limit_pvt_pitch', 'pitch', { initParam, adapterId }),
     )
-    expect(await roll.setZero()).toBe(true)
     manager.fake!.injectFeedback(BUS_ID, 1, { position: 0, speed: 0, current: 0, motorTemperature: 25, mosTemperature: 25 })
     manager.fake!.injectFeedback(BUS_ID, 2, { position: 0, speed: 0, current: 0, motorTemperature: 25, mosTemperature: 25 })
 
     manager.fake!.clearCommandRecords()
     await roll.pvtControl(10, 1, 0.05, 0.4, 0.5)
+    expect(manager.fake!.getCommandCount()).toBe(0)
+    await pitch.pvtControl(10, 1, 0, 0, 0)
     expect(manager.fake!.getCommandCount()).toBe(2)
     expect(manager.fake!.getCommandRecords().every((r) => r.kind === FakeCommandKind.Stop)).toBe(true)
     manager.dispose()
   })
 
-  it('uniformly limits PVT speed and torque to motor ranges', async () => {
+  it('delegates PVT speed and torque saturation to the driver', async () => {
     const adapterId = `${ADAPTER_NAME}_limit_pvt_st`
     const manager = await createManager(runtime, adapterId)
     const initParam = {
@@ -940,7 +935,6 @@ describe('DoubleCoupleJoint limits and scaling', () => {
     await manager.addJoint(
       dcJointDef('limit_pvt_st_pitch', 'pitch', { initParam, adapterId }),
     )
-    expect(await roll.setZero()).toBe(true)
 
     manager.fake!.clearCommandRecords()
     await roll.pvtControl(10, 1, 0, 2, 3)
@@ -956,7 +950,7 @@ describe('DoubleCoupleJoint limits and scaling', () => {
     manager.dispose()
   })
 
-  it('limits speed control to motor speed range', async () => {
+  it('rejects speed control outside motor speed range', async () => {
     const adapterId = `${ADAPTER_NAME}_limit_spd`
     const manager = await createManager(runtime, adapterId)
     const initParam = {
@@ -976,22 +970,17 @@ describe('DoubleCoupleJoint limits and scaling', () => {
     const pitch = await manager.addJoint(
       dcJointDef('limit_spd_pitch', 'pitch', { initParam, adapterId }),
     )
-    expect(await roll.setZero()).toBe(true)
 
     manager.fake!.clearCommandRecords()
     await roll.spdControl(2.0, 0.5, 1)
-    await pitch.spdControl(0, 0.5, 1)
+    await expect(pitch.spdControl(0, 0.5, 1)).rejects.toThrow('outside valid range')
     const recs = manager.fake!.getCommandRecords()
     expect(recs).toHaveLength(2)
-    expect(recs.every((r) => r.kind === FakeCommandKind.SpdControl)).toBe(true)
-    for (const rec of recs) {
-      const idx = recs.indexOf(rec)
-      expect(Math.abs(manager.fake!.getSpdCommand(idx).speed)).toBeLessThanOrEqual(0.2 + 1e-3)
-    }
+    expect(recs.every((r) => r.kind === FakeCommandKind.PosControl)).toBe(true)
     manager.dispose()
   })
 
-  it('limits torque control to motor torque range', async () => {
+  it('rejects torque control outside motor torque range', async () => {
     const adapterId = `${ADAPTER_NAME}_limit_tor`
     const manager = await createManager(runtime, adapterId)
     const initParam = {
@@ -1011,18 +1000,13 @@ describe('DoubleCoupleJoint limits and scaling', () => {
     const pitch = await manager.addJoint(
       dcJointDef('limit_tor_pitch', 'pitch', { initParam, adapterId }),
     )
-    expect(await roll.setZero()).toBe(true)
 
     manager.fake!.clearCommandRecords()
     await roll.torControl(3.0, 1)
-    await pitch.torControl(0, 1)
+    await expect(pitch.torControl(0, 1)).rejects.toThrow('outside valid range')
     const recs = manager.fake!.getCommandRecords()
     expect(recs).toHaveLength(2)
-    expect(recs.every((r) => r.kind === FakeCommandKind.TorControl)).toBe(true)
-    for (const rec of recs) {
-      const idx = recs.indexOf(rec)
-      expect(Math.abs(manager.fake!.getTorCommand(idx).torque)).toBeLessThanOrEqual(0.2 + 1e-3)
-    }
+    expect(recs.every((r) => r.kind === FakeCommandKind.PosControl)).toBe(true)
     manager.dispose()
   })
 
@@ -1036,11 +1020,12 @@ describe('DoubleCoupleJoint limits and scaling', () => {
       }),
     )
     await manager.addJoint(dcJointDef('motorlim1_pitch', 'pitch', { adapterId }))
-    expect(await roll.setZero()).toBe(true)
     manager.fake!.injectFeedback(BUS_ID, 1, { position: 0, speed: 0, current: 0, motorTemperature: 25, mosTemperature: 25 })
     manager.fake!.injectFeedback(BUS_ID, 2, { position: 0, speed: 0, current: 0, motorTemperature: 25, mosTemperature: 25 })
 
     manager.fake!.clearCommandRecords()
+    await roll.posControl(0.05, 1, 1, 1)
+    expect(manager.fake!.getCommandCount()).toBe(0)
     await roll.posControl(0.05, 1, 1, 1)
     expect(manager.fake!.getCommandCount()).toBe(2)
     expect(manager.fake!.getCommandRecords().every((r) => r.kind === FakeCommandKind.Stop)).toBe(true)
@@ -1054,11 +1039,11 @@ describe('DoubleCoupleJoint limits and scaling', () => {
       dcJointDef('dynlim_roll', 'roll', { limit: { min: -0.1, max: 0.1 }, adapterId }),
     )
     const pitch = await manager.addJoint(dcJointDef('dynlim_pitch', 'pitch', { adapterId }))
-    expect(await roll.setZero()).toBe(true)
 
     manager.fake!.clearCommandRecords()
-    await roll.posControl(0.2, 1, 1, 1)
-    await roll.posControl(0.2, 1, 1, 1)
+    const boundary = 0.1 - (2 * Math.PI) / 180
+    await roll.posControl(boundary, 1, 1, 1)
+    await roll.posControl(boundary, 1, 1, 1)
     const recs = manager.fake!.getCommandRecords()
     expect(recs).toHaveLength(2)
     const motor1Pos = manager.fake!.getPosCommand(recs.findIndex((r) => r.motorIndex === 1)).position
@@ -1116,6 +1101,8 @@ describe('DoubleCoupleJoint H130 ankle guard', () => {
 
     manager.fake!.clearCommandRecords()
     await pitch.posControl((-31.8 * Math.PI) / 180, 1, 0.5, 1)
+    expect(manager.fake!.getCommandCount()).toBe(0)
+    await pitch.posControl((-31.8 * Math.PI) / 180, 1, 0.5, 1)
 
     const recs = manager.fake!.getCommandRecords()
     expect(recs).toHaveLength(2)
@@ -1160,7 +1147,6 @@ describe('DoubleCoupleJoint reverse slave', () => {
     manager = await createManager(runtime)
     roll = await manager.addJoint(dcJointDef('rev_roll', 'roll'))
     pitch = await manager.addJoint(dcJointDef('rev_pitch', 'pitch', { reverse: true, limit: { min: -0.1, max: 0.1 } }))
-    expect(await roll.setZero()).toBe(true)
   })
 
   afterAll(() => {
@@ -1185,8 +1171,9 @@ describe('DoubleCoupleJoint reverse slave', () => {
 
   it('stops dynamic controls at the reversed slave joint limit', async () => {
     manager.fake!.clearCommandRecords()
-    await pitch.posControl(0.2, 1, 1, 1)
-    await pitch.posControl(0.2, 1, 1, 1)
+    const boundary = 0.1 - (2 * Math.PI) / 180
+    await pitch.posControl(boundary, 1, 1, 1)
+    await pitch.posControl(boundary, 1, 1, 1)
     const recs = manager.fake!.getCommandRecords()
     const motor1Pos = manager.fake!.getPosCommand(recs.findIndex((r) => r.motorIndex === 1)).position
     const motor2Pos = manager.fake!.getPosCommand(recs.findIndex((r) => r.motorIndex === 2)).position
@@ -1388,5 +1375,27 @@ describe('Adapter creation from JSON and per-motor motorParams', () => {
     manager.fake!.clearCommandRecords()
     await joint.posControl(0.1, 1, 1, 1)
     expect(manager.fake!.getLastCommand()!.rawFrameFlags & 0x06).toBe(0)
+  })
+})
+
+
+describe('PVT mode WASM boundary', () => {
+  it('rejects removed modes even when bypassing TypeScript validation', async () => {
+    const module = await (await createDefaultHost()).loadWasmModule()
+    const runtime = await createJointRuntime({ module })
+    const adapterId = 'removed_pvt_modes'
+    const manager = await createManager(runtime, adapterId)
+    try {
+      const joint = await manager.addJoint(dcJointDef('removed_mode_roll', 'roll', { adapterId }))
+      const control = module.cwrap('joint_sdk_joint_pvt_control', 'number',
+        Array(7).fill('number'), { async: true })
+      manager.fake!.clearCommandRecords()
+      for (const mode of [3, 4, 5]) {
+        expect(await control(joint.handle, 0, 0, 0, 0, 0, mode)).toBe(1)
+      }
+      expect(manager.fake!.getCommandCount()).toBe(0)
+    } finally {
+      runtime.dispose()
+    }
   })
 })

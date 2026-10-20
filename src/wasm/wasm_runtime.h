@@ -12,14 +12,13 @@
 #include <utility>
 #include <vector>
 
-#include <nlohmann/json.hpp>
-
 #include "JointManager.h"
 #include "adapter/base_adapter.h"
 #include "adapter/fake_adapter_control.h"
 #include "encos_motor.h"
+#include "external/json.hpp"
 #include "platform/log.h"
-#include "plugins/fake/fake_adapter.h"
+#include "plugins/adapter/fake/fake_adapter.h"
 
 namespace encos {
 namespace wasm {
@@ -109,7 +108,7 @@ public:
                                 const std::string& logger_name, LogLevel log_level);
     void CreateAdapter(std::uint32_t manager_handle, const std::string& adapter_type,
                        const std::string& adapter_name, const std::string& logger_name,
-                       LogLevel log_level);
+                       LogLevel log_level, const nlohmann::json& extend);
     void DisposeManager(std::uint32_t handle);
     ManagerEntry* GetManager(std::uint32_t handle);
     WasmJointManager* GetManagerObject(std::uint32_t handle);

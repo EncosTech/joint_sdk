@@ -15,9 +15,9 @@
 #include <boost/preprocessor/tuple/elem.hpp>
 #include <boost/preprocessor/tuple/size.hpp>
 #include <boost/preprocessor/tuple/to_seq.hpp>
-#include <nlohmann/json.hpp>
 
-#include "motor/types.h"
+#include "device/motor/types.h"
+#include "external/json.hpp"
 
 namespace encos {
 
