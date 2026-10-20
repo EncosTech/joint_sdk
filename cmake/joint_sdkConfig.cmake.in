@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Encos
+# SPDX-License-Identifier: MIT
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(encos_driver 4.0.0 REQUIRED CONFIG)
+find_dependency(couple_joint_solver REQUIRED CONFIG)
+find_dependency(Threads REQUIRED)
+
+include("${CMAKE_CURRENT_LIST_DIR}/joint_sdkTargets.cmake")
+
+check_required_components(joint_sdk)

@@ -1,0 +1,1288 @@
+{
+  "ContinuousJoint": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "definitions": {
+      "MotorParams": {
+        "description": "Motor initialization parameters",
+        "properties": {
+          "adapterId": {
+            "description": "Adapter reference: an integer selects the adapter by creation order, a string selects it by name",
+            "type": [
+              "string",
+              "integer"
+            ]
+          },
+          "busId": {
+            "description": "Bus ID",
+            "type": "integer"
+          },
+          "canfd": {
+            "description": "Enable CAN FD frames for this motor; the global switch takes precedence",
+            "type": "boolean"
+          },
+          "initParam": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Auto initialization",
+                "properties": {},
+                "type": "object"
+              },
+              {
+                "description": "Initialize by motor model",
+                "properties": {
+                  "model": {
+                    "enum": [
+                      "EC_A2806_P2",
+                      "EC_A2806_P2_72V",
+                      "EC_A4310_P2",
+                      "EC_A4310_P2_72V",
+                      "EC_A4315_P2",
+                      "EC_A4315_P2_72V",
+                      "EC_A6408_P2",
+                      "EC_A6408_P2_72V",
+                      "EC_A6416_P2",
+                      "EC_A6416_P2_72V",
+                      "EC_A8112_P1",
+                      "EC_A8112_P1_72V",
+                      "EC_A8116_P1",
+                      "EC_A8116_P1_72V",
+                      "EC_A10020_P1_12",
+                      "EC_A10020_P1_12_72V",
+                      "EC_A10020_P1_6",
+                      "EC_A10020_P1_6_72V",
+                      "EC_A13720_P1",
+                      "EC_A13720_P1_72V",
+                      "EC_A13715_P1",
+                      "EC_A13715_P1_72V",
+                      "EC_A4310_P2_H",
+                      "EC_A4310_P2_H_72V",
+                      "EC_A6408_P2_16H",
+                      "EC_A6408_P2_16H_72V",
+                      "EC_A6408_P2_32H",
+                      "EC_A6408_P2_32H_72V",
+                      "EC_A6408_P2_32HB",
+                      "EC_A6408_P2_32HB_72V",
+                      "EC_A6416_P2_H",
+                      "EC_A6416_P2_H_72V",
+                      "EC_A8112_P1_H",
+                      "EC_A8112_P1_H_72V",
+                      "EC_A8116_P1_H",
+                      "EC_A8116_P1_H_72V",
+                      "EC_A10010_P2",
+                      "EC_A10010_P2_72V",
+                      "EC_A10020_P2",
+                      "EC_A10020_P2_72V",
+                      "EC_A10010_P2_16",
+                      "EC_A10015_P2_16",
+                      "EC_A10020_P2_16",
+                      "EC_A10010_P2_24",
+                      "EC_A10020_P2_24",
+                      "EC_A10020_P2_24_72V",
+                      "EC_A3814_H14",
+                      "EC_A3814_H14_72V",
+                      "EC_A5013_H17",
+                      "EC_A5013_H17_72V",
+                      "EC_A6013_H20",
+                      "EC_A6013_H20_72V",
+                      "EC_A4310_P2_36H_ABC",
+                      "EC_A10320_P2",
+                      "EC_A10320_P2_72V",
+                      "EC_A7520_P2",
+                      "EC_A7520_P2_72V",
+                      "EC_A5016_P2_17H",
+                      "EC_A5020_P2",
+                      "EC_A5025_P2",
+                      "EC_A7216_P2",
+                      "EC_A7220_P2",
+                      "EC_A7225_P2",
+                      "EC_A9016_P2",
+                      "EC_A9020_P2",
+                      "EC_A9025_P2",
+                      "EC_A10820_P2",
+                      "EC_A10825_P2",
+                      "EC_A8116_H32_100",
+                      "EC_DEXTEROUS_HAND",
+                      "EC_A10015_P2_24",
+                      "EC_A8116_H32_100_B"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "model"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Initialize with custom PVT ranges",
+                "properties": {
+                  "ranges": {
+                    "properties": {
+                      "current": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "kd": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "kp": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "kt": {
+                        "type": "number"
+                      },
+                      "position": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "speed": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "torque": {
+                        "$ref": "#/definitions/Range"
+                      }
+                    },
+                    "required": [
+                      "kp",
+                      "kd",
+                      "position",
+                      "speed",
+                      "torque",
+                      "current",
+                      "kt"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "ranges"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "motorId": {
+            "description": "Motor ID on the bus",
+            "type": "integer"
+          },
+          "slaveId": {
+            "description": "Slave ID on the network; combined with busId as slaveId << 16 | busId",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "adapterId",
+          "busId",
+          "motorId",
+          "initParam"
+        ],
+        "type": "object"
+      },
+      "Range": {
+        "properties": {
+          "max": {
+            "type": "number"
+          },
+          "min": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "min",
+          "max"
+        ],
+        "type": "object"
+      }
+    },
+    "properties": {
+      "maxSpd": {
+        "description": "Maximum speed",
+        "type": "number"
+      },
+      "maxTor": {
+        "description": "Maximum torque",
+        "type": "number"
+      },
+      "motorParams": {
+        "$ref": "#/definitions/MotorParams",
+        "description": "Motor initialization parameters"
+      },
+      "reverse": {
+        "description": "Reverse direction",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "motorParams",
+      "maxSpd",
+      "maxTor",
+      "reverse"
+    ],
+    "title": "ContinuousJoint Config",
+    "type": "object"
+  },
+  "DoubleCoupleJoint": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "definitions": {
+      "CalibrationInput": {
+        "properties": {
+          "leftJointCenter": {
+            "$ref": "#/definitions/Point3"
+          },
+          "leftPlanarEndpoint": {
+            "$ref": "#/definitions/Point3"
+          },
+          "leftSpatialEndpoint": {
+            "$ref": "#/definitions/Point3"
+          },
+          "pitchCenter": {
+            "$ref": "#/definitions/Point3"
+          },
+          "rightJointCenter": {
+            "$ref": "#/definitions/Point3"
+          },
+          "rightPlanarEndpoint": {
+            "$ref": "#/definitions/Point3"
+          },
+          "rightSpatialEndpoint": {
+            "$ref": "#/definitions/Point3"
+          },
+          "rollCenter": {
+            "$ref": "#/definitions/Point3"
+          },
+          "rotateDirection": {
+            "$ref": "#/definitions/Point3"
+          },
+          "rotationOrder": {
+            "oneOf": [
+              {
+                "enum": [
+                  "PitchThenRoll",
+                  "RollThenPitch",
+                  "pitch_then_roll",
+                  "roll_then_pitch"
+                ],
+                "type": "string"
+              },
+              {
+                "enum": [
+                  0,
+                  1
+                ],
+                "type": "integer"
+              }
+            ]
+          }
+        },
+        "required": [
+          "leftJointCenter",
+          "rightJointCenter",
+          "leftPlanarEndpoint",
+          "rightPlanarEndpoint",
+          "rollCenter",
+          "pitchCenter",
+          "leftSpatialEndpoint",
+          "rightSpatialEndpoint",
+          "rotationOrder"
+        ],
+        "type": "object"
+      },
+      "MotorParams": {
+        "description": "Motor initialization parameters",
+        "properties": {
+          "adapterId": {
+            "description": "Adapter reference: an integer selects the adapter by creation order, a string selects it by name",
+            "type": [
+              "string",
+              "integer"
+            ]
+          },
+          "busId": {
+            "description": "Bus ID",
+            "type": "integer"
+          },
+          "canfd": {
+            "description": "Enable CAN FD frames for this motor; the global switch takes precedence",
+            "type": "boolean"
+          },
+          "initParam": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Auto initialization",
+                "properties": {},
+                "type": "object"
+              },
+              {
+                "description": "Initialize by motor model",
+                "properties": {
+                  "model": {
+                    "enum": [
+                      "EC_A2806_P2",
+                      "EC_A2806_P2_72V",
+                      "EC_A4310_P2",
+                      "EC_A4310_P2_72V",
+                      "EC_A4315_P2",
+                      "EC_A4315_P2_72V",
+                      "EC_A6408_P2",
+                      "EC_A6408_P2_72V",
+                      "EC_A6416_P2",
+                      "EC_A6416_P2_72V",
+                      "EC_A8112_P1",
+                      "EC_A8112_P1_72V",
+                      "EC_A8116_P1",
+                      "EC_A8116_P1_72V",
+                      "EC_A10020_P1_12",
+                      "EC_A10020_P1_12_72V",
+                      "EC_A10020_P1_6",
+                      "EC_A10020_P1_6_72V",
+                      "EC_A13720_P1",
+                      "EC_A13720_P1_72V",
+                      "EC_A13715_P1",
+                      "EC_A13715_P1_72V",
+                      "EC_A4310_P2_H",
+                      "EC_A4310_P2_H_72V",
+                      "EC_A6408_P2_16H",
+                      "EC_A6408_P2_16H_72V",
+                      "EC_A6408_P2_32H",
+                      "EC_A6408_P2_32H_72V",
+                      "EC_A6408_P2_32HB",
+                      "EC_A6408_P2_32HB_72V",
+                      "EC_A6416_P2_H",
+                      "EC_A6416_P2_H_72V",
+                      "EC_A8112_P1_H",
+                      "EC_A8112_P1_H_72V",
+                      "EC_A8116_P1_H",
+                      "EC_A8116_P1_H_72V",
+                      "EC_A10010_P2",
+                      "EC_A10010_P2_72V",
+                      "EC_A10020_P2",
+                      "EC_A10020_P2_72V",
+                      "EC_A10010_P2_16",
+                      "EC_A10015_P2_16",
+                      "EC_A10020_P2_16",
+                      "EC_A10010_P2_24",
+                      "EC_A10020_P2_24",
+                      "EC_A10020_P2_24_72V",
+                      "EC_A3814_H14",
+                      "EC_A3814_H14_72V",
+                      "EC_A5013_H17",
+                      "EC_A5013_H17_72V",
+                      "EC_A6013_H20",
+                      "EC_A6013_H20_72V",
+                      "EC_A4310_P2_36H_ABC",
+                      "EC_A10320_P2",
+                      "EC_A10320_P2_72V",
+                      "EC_A7520_P2",
+                      "EC_A7520_P2_72V",
+                      "EC_A5016_P2_17H",
+                      "EC_A5020_P2",
+                      "EC_A5025_P2",
+                      "EC_A7216_P2",
+                      "EC_A7220_P2",
+                      "EC_A7225_P2",
+                      "EC_A9016_P2",
+                      "EC_A9020_P2",
+                      "EC_A9025_P2",
+                      "EC_A10820_P2",
+                      "EC_A10825_P2",
+                      "EC_A8116_H32_100",
+                      "EC_DEXTEROUS_HAND",
+                      "EC_A10015_P2_24",
+                      "EC_A8116_H32_100_B"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "model"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Initialize with custom PVT ranges",
+                "properties": {
+                  "ranges": {
+                    "properties": {
+                      "current": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "kd": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "kp": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "kt": {
+                        "type": "number"
+                      },
+                      "position": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "speed": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "torque": {
+                        "$ref": "#/definitions/Range"
+                      }
+                    },
+                    "required": [
+                      "kp",
+                      "kd",
+                      "position",
+                      "speed",
+                      "torque",
+                      "current",
+                      "kt"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "ranges"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "motorId": {
+            "description": "Motor ID on the bus",
+            "type": "integer"
+          },
+          "slaveId": {
+            "description": "Slave ID on the network; combined with busId as slaveId << 16 | busId",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "adapterId",
+          "busId",
+          "motorId",
+          "initParam"
+        ],
+        "type": "object"
+      },
+      "Point3": {
+        "properties": {
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "z": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "z"
+        ],
+        "type": "object"
+      },
+      "Range": {
+        "properties": {
+          "max": {
+            "type": "number"
+          },
+          "min": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "min",
+          "max"
+        ],
+        "type": "object"
+      }
+    },
+    "properties": {
+      "axis": {
+        "description": "Output axis: roll or pitch",
+        "enum": [
+          "roll",
+          "pitch",
+          "Roll",
+          "Pitch"
+        ],
+        "type": "string"
+      },
+      "calibration": {
+        "$ref": "#/definitions/CalibrationInput",
+        "description": "Closed-chain calibration parameters"
+      },
+      "limit": {
+        "$ref": "#/definitions/Range",
+        "description": "Position limit range"
+      },
+      "maxSpd": {
+        "description": "Maximum speed",
+        "type": "number"
+      },
+      "maxTor": {
+        "description": "Maximum torque",
+        "type": "number"
+      },
+      "motorLimit1": {
+        "$ref": "#/definitions/Range",
+        "description": "Motor 1 relative position limit"
+      },
+      "motorLimit2": {
+        "$ref": "#/definitions/Range",
+        "description": "Motor 2 relative position limit"
+      },
+      "motorParams1": {
+        "$ref": "#/definitions/MotorParams",
+        "description": "Motor 1 initialization parameters"
+      },
+      "motorParams2": {
+        "$ref": "#/definitions/MotorParams",
+        "description": "Motor 2 initialization parameters"
+      },
+      "reverse": {
+        "description": "Reverse direction",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "motorParams1",
+      "motorParams2",
+      "axis",
+      "calibration",
+      "limit",
+      "maxSpd",
+      "maxTor",
+      "reverse"
+    ],
+    "title": "DoubleCoupleJoint Config",
+    "type": "object"
+  },
+  "RJoint": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "definitions": {
+      "MotorParams": {
+        "description": "Motor initialization parameters",
+        "properties": {
+          "adapterId": {
+            "description": "Adapter reference: an integer selects the adapter by creation order, a string selects it by name",
+            "type": [
+              "string",
+              "integer"
+            ]
+          },
+          "busId": {
+            "description": "Bus ID",
+            "type": "integer"
+          },
+          "canfd": {
+            "description": "Enable CAN FD frames for this motor; the global switch takes precedence",
+            "type": "boolean"
+          },
+          "initParam": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Auto initialization",
+                "properties": {},
+                "type": "object"
+              },
+              {
+                "description": "Initialize by motor model",
+                "properties": {
+                  "model": {
+                    "enum": [
+                      "EC_A2806_P2",
+                      "EC_A2806_P2_72V",
+                      "EC_A4310_P2",
+                      "EC_A4310_P2_72V",
+                      "EC_A4315_P2",
+                      "EC_A4315_P2_72V",
+                      "EC_A6408_P2",
+                      "EC_A6408_P2_72V",
+                      "EC_A6416_P2",
+                      "EC_A6416_P2_72V",
+                      "EC_A8112_P1",
+                      "EC_A8112_P1_72V",
+                      "EC_A8116_P1",
+                      "EC_A8116_P1_72V",
+                      "EC_A10020_P1_12",
+                      "EC_A10020_P1_12_72V",
+                      "EC_A10020_P1_6",
+                      "EC_A10020_P1_6_72V",
+                      "EC_A13720_P1",
+                      "EC_A13720_P1_72V",
+                      "EC_A13715_P1",
+                      "EC_A13715_P1_72V",
+                      "EC_A4310_P2_H",
+                      "EC_A4310_P2_H_72V",
+                      "EC_A6408_P2_16H",
+                      "EC_A6408_P2_16H_72V",
+                      "EC_A6408_P2_32H",
+                      "EC_A6408_P2_32H_72V",
+                      "EC_A6408_P2_32HB",
+                      "EC_A6408_P2_32HB_72V",
+                      "EC_A6416_P2_H",
+                      "EC_A6416_P2_H_72V",
+                      "EC_A8112_P1_H",
+                      "EC_A8112_P1_H_72V",
+                      "EC_A8116_P1_H",
+                      "EC_A8116_P1_H_72V",
+                      "EC_A10010_P2",
+                      "EC_A10010_P2_72V",
+                      "EC_A10020_P2",
+                      "EC_A10020_P2_72V",
+                      "EC_A10010_P2_16",
+                      "EC_A10015_P2_16",
+                      "EC_A10020_P2_16",
+                      "EC_A10010_P2_24",
+                      "EC_A10020_P2_24",
+                      "EC_A10020_P2_24_72V",
+                      "EC_A3814_H14",
+                      "EC_A3814_H14_72V",
+                      "EC_A5013_H17",
+                      "EC_A5013_H17_72V",
+                      "EC_A6013_H20",
+                      "EC_A6013_H20_72V",
+                      "EC_A4310_P2_36H_ABC",
+                      "EC_A10320_P2",
+                      "EC_A10320_P2_72V",
+                      "EC_A7520_P2",
+                      "EC_A7520_P2_72V",
+                      "EC_A5016_P2_17H",
+                      "EC_A5020_P2",
+                      "EC_A5025_P2",
+                      "EC_A7216_P2",
+                      "EC_A7220_P2",
+                      "EC_A7225_P2",
+                      "EC_A9016_P2",
+                      "EC_A9020_P2",
+                      "EC_A9025_P2",
+                      "EC_A10820_P2",
+                      "EC_A10825_P2",
+                      "EC_A8116_H32_100",
+                      "EC_DEXTEROUS_HAND",
+                      "EC_A10015_P2_24",
+                      "EC_A8116_H32_100_B"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "model"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Initialize with custom PVT ranges",
+                "properties": {
+                  "ranges": {
+                    "properties": {
+                      "current": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "kd": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "kp": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "kt": {
+                        "type": "number"
+                      },
+                      "position": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "speed": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "torque": {
+                        "$ref": "#/definitions/Range"
+                      }
+                    },
+                    "required": [
+                      "kp",
+                      "kd",
+                      "position",
+                      "speed",
+                      "torque",
+                      "current",
+                      "kt"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "ranges"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "motorId": {
+            "description": "Motor ID on the bus",
+            "type": "integer"
+          },
+          "slaveId": {
+            "description": "Slave ID on the network; combined with busId as slaveId << 16 | busId",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "adapterId",
+          "busId",
+          "motorId",
+          "initParam"
+        ],
+        "type": "object"
+      },
+      "Range": {
+        "properties": {
+          "max": {
+            "type": "number"
+          },
+          "min": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "min",
+          "max"
+        ],
+        "type": "object"
+      }
+    },
+    "properties": {
+      "limit": {
+        "$ref": "#/definitions/Range",
+        "description": "Position limit range"
+      },
+      "maxSpd": {
+        "description": "Maximum speed",
+        "type": "number"
+      },
+      "maxTor": {
+        "description": "Maximum torque",
+        "type": "number"
+      },
+      "motorParams": {
+        "$ref": "#/definitions/MotorParams",
+        "description": "Motor initialization parameters"
+      },
+      "reverse": {
+        "description": "Reverse direction",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "motorParams",
+      "limit",
+      "maxSpd",
+      "maxTor",
+      "reverse"
+    ],
+    "title": "RJoint Config",
+    "type": "object"
+  },
+  "ControlConfig": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "joint_sdk control.json",
+    "description": "Extract this entry as the schema document before validating a full control.json. Structural validation does not check hardware, reference resolution, joint uniqueness, or closed-chain pairing.",
+    "type": "object",
+    "definitions": {
+      "MotorParams": {
+        "description": "Motor initialization parameters",
+        "properties": {
+          "adapterId": {
+            "description": "Adapter reference: an integer selects the adapter by creation order, a string selects it by name",
+            "type": [
+              "string",
+              "integer"
+            ]
+          },
+          "busId": {
+            "description": "Bus ID",
+            "type": "integer"
+          },
+          "canfd": {
+            "description": "Enable CAN FD frames for this motor; the global switch takes precedence",
+            "type": "boolean"
+          },
+          "initParam": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Auto initialization",
+                "properties": {},
+                "type": "object"
+              },
+              {
+                "description": "Initialize by motor model",
+                "properties": {
+                  "model": {
+                    "enum": [
+                      "EC_A2806_P2",
+                      "EC_A2806_P2_72V",
+                      "EC_A4310_P2",
+                      "EC_A4310_P2_72V",
+                      "EC_A4315_P2",
+                      "EC_A4315_P2_72V",
+                      "EC_A6408_P2",
+                      "EC_A6408_P2_72V",
+                      "EC_A6416_P2",
+                      "EC_A6416_P2_72V",
+                      "EC_A8112_P1",
+                      "EC_A8112_P1_72V",
+                      "EC_A8116_P1",
+                      "EC_A8116_P1_72V",
+                      "EC_A10020_P1_12",
+                      "EC_A10020_P1_12_72V",
+                      "EC_A10020_P1_6",
+                      "EC_A10020_P1_6_72V",
+                      "EC_A13720_P1",
+                      "EC_A13720_P1_72V",
+                      "EC_A13715_P1",
+                      "EC_A13715_P1_72V",
+                      "EC_A4310_P2_H",
+                      "EC_A4310_P2_H_72V",
+                      "EC_A6408_P2_16H",
+                      "EC_A6408_P2_16H_72V",
+                      "EC_A6408_P2_32H",
+                      "EC_A6408_P2_32H_72V",
+                      "EC_A6408_P2_32HB",
+                      "EC_A6408_P2_32HB_72V",
+                      "EC_A6416_P2_H",
+                      "EC_A6416_P2_H_72V",
+                      "EC_A8112_P1_H",
+                      "EC_A8112_P1_H_72V",
+                      "EC_A8116_P1_H",
+                      "EC_A8116_P1_H_72V",
+                      "EC_A10010_P2",
+                      "EC_A10010_P2_72V",
+                      "EC_A10020_P2",
+                      "EC_A10020_P2_72V",
+                      "EC_A10010_P2_16",
+                      "EC_A10015_P2_16",
+                      "EC_A10020_P2_16",
+                      "EC_A10010_P2_24",
+                      "EC_A10020_P2_24",
+                      "EC_A10020_P2_24_72V",
+                      "EC_A3814_H14",
+                      "EC_A3814_H14_72V",
+                      "EC_A5013_H17",
+                      "EC_A5013_H17_72V",
+                      "EC_A6013_H20",
+                      "EC_A6013_H20_72V",
+                      "EC_A4310_P2_36H_ABC",
+                      "EC_A10320_P2",
+                      "EC_A10320_P2_72V",
+                      "EC_A7520_P2",
+                      "EC_A7520_P2_72V",
+                      "EC_A5016_P2_17H",
+                      "EC_A5020_P2",
+                      "EC_A5025_P2",
+                      "EC_A7216_P2",
+                      "EC_A7220_P2",
+                      "EC_A7225_P2",
+                      "EC_A9016_P2",
+                      "EC_A9020_P2",
+                      "EC_A9025_P2",
+                      "EC_A10820_P2",
+                      "EC_A10825_P2",
+                      "EC_A8116_H32_100",
+                      "EC_DEXTEROUS_HAND",
+                      "EC_A10015_P2_24",
+                      "EC_A8116_H32_100_B"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "model"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Initialize with custom PVT ranges",
+                "properties": {
+                  "ranges": {
+                    "properties": {
+                      "current": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "kd": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "kp": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "kt": {
+                        "type": "number"
+                      },
+                      "position": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "speed": {
+                        "$ref": "#/definitions/Range"
+                      },
+                      "torque": {
+                        "$ref": "#/definitions/Range"
+                      }
+                    },
+                    "required": [
+                      "kp",
+                      "kd",
+                      "position",
+                      "speed",
+                      "torque",
+                      "current",
+                      "kt"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "ranges"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "motorId": {
+            "description": "Motor ID on the bus",
+            "type": "integer"
+          },
+          "slaveId": {
+            "description": "Slave ID on the network; combined with busId as slaveId << 16 | busId",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "adapterId",
+          "busId",
+          "motorId",
+          "initParam"
+        ],
+        "type": "object"
+      },
+      "Range": {
+        "properties": {
+          "max": {
+            "type": "number"
+          },
+          "min": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "min",
+          "max"
+        ],
+        "type": "object"
+      },
+      "ContinuousJointConfig": {
+        "properties": {
+          "maxSpd": {
+            "description": "Maximum speed",
+            "type": "number"
+          },
+          "maxTor": {
+            "description": "Maximum torque",
+            "type": "number"
+          },
+          "motorParams": {
+            "$ref": "#/definitions/MotorParams",
+            "description": "Motor initialization parameters"
+          },
+          "reverse": {
+            "description": "Reverse direction",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "motorParams",
+          "maxSpd",
+          "maxTor",
+          "reverse"
+        ],
+        "title": "ContinuousJoint Config",
+        "type": "object"
+      },
+      "CalibrationInput": {
+        "properties": {
+          "leftJointCenter": {
+            "$ref": "#/definitions/Point3"
+          },
+          "leftPlanarEndpoint": {
+            "$ref": "#/definitions/Point3"
+          },
+          "leftSpatialEndpoint": {
+            "$ref": "#/definitions/Point3"
+          },
+          "pitchCenter": {
+            "$ref": "#/definitions/Point3"
+          },
+          "rightJointCenter": {
+            "$ref": "#/definitions/Point3"
+          },
+          "rightPlanarEndpoint": {
+            "$ref": "#/definitions/Point3"
+          },
+          "rightSpatialEndpoint": {
+            "$ref": "#/definitions/Point3"
+          },
+          "rollCenter": {
+            "$ref": "#/definitions/Point3"
+          },
+          "rotateDirection": {
+            "$ref": "#/definitions/Point3"
+          },
+          "rotationOrder": {
+            "oneOf": [
+              {
+                "enum": [
+                  "PitchThenRoll",
+                  "RollThenPitch",
+                  "pitch_then_roll",
+                  "roll_then_pitch"
+                ],
+                "type": "string"
+              },
+              {
+                "enum": [
+                  0,
+                  1
+                ],
+                "type": "integer"
+              }
+            ]
+          }
+        },
+        "required": [
+          "leftJointCenter",
+          "rightJointCenter",
+          "leftPlanarEndpoint",
+          "rightPlanarEndpoint",
+          "rollCenter",
+          "pitchCenter",
+          "leftSpatialEndpoint",
+          "rightSpatialEndpoint",
+          "rotationOrder"
+        ],
+        "type": "object"
+      },
+      "Point3": {
+        "properties": {
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "z": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "z"
+        ],
+        "type": "object"
+      },
+      "DoubleCoupleJointConfig": {
+        "properties": {
+          "axis": {
+            "description": "Output axis: roll or pitch",
+            "enum": [
+              "roll",
+              "pitch",
+              "Roll",
+              "Pitch"
+            ],
+            "type": "string"
+          },
+          "calibration": {
+            "$ref": "#/definitions/CalibrationInput",
+            "description": "Closed-chain calibration parameters"
+          },
+          "limit": {
+            "$ref": "#/definitions/Range",
+            "description": "Position limit range"
+          },
+          "maxSpd": {
+            "description": "Maximum speed",
+            "type": "number"
+          },
+          "maxTor": {
+            "description": "Maximum torque",
+            "type": "number"
+          },
+          "motorLimit1": {
+            "$ref": "#/definitions/Range",
+            "description": "Motor 1 relative position limit"
+          },
+          "motorLimit2": {
+            "$ref": "#/definitions/Range",
+            "description": "Motor 2 relative position limit"
+          },
+          "motorParams1": {
+            "$ref": "#/definitions/MotorParams",
+            "description": "Motor 1 initialization parameters"
+          },
+          "motorParams2": {
+            "$ref": "#/definitions/MotorParams",
+            "description": "Motor 2 initialization parameters"
+          },
+          "reverse": {
+            "description": "Reverse direction",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "motorParams1",
+          "motorParams2",
+          "axis",
+          "calibration",
+          "limit",
+          "maxSpd",
+          "maxTor",
+          "reverse"
+        ],
+        "title": "DoubleCoupleJoint Config",
+        "type": "object"
+      },
+      "RJointConfig": {
+        "properties": {
+          "limit": {
+            "$ref": "#/definitions/Range",
+            "description": "Position limit range"
+          },
+          "maxSpd": {
+            "description": "Maximum speed",
+            "type": "number"
+          },
+          "maxTor": {
+            "description": "Maximum torque",
+            "type": "number"
+          },
+          "motorParams": {
+            "$ref": "#/definitions/MotorParams",
+            "description": "Motor initialization parameters"
+          },
+          "reverse": {
+            "description": "Reverse direction",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "motorParams",
+          "limit",
+          "maxSpd",
+          "maxTor",
+          "reverse"
+        ],
+        "title": "RJoint Config",
+        "type": "object"
+      },
+      "Adapter": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Driver plugin type; availability depends on the installed driver"
+          },
+          "name": {
+            "type": "string",
+            "description": "Adapter interface name and identity"
+          },
+          "extend": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Plugin-defined configuration; omitted or null means an empty object"
+          }
+        },
+        "required": [
+          "type",
+          "name"
+        ]
+      },
+      "Joint": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "ContinuousJoint"
+              },
+              "config": {
+                "$ref": "#/definitions/ContinuousJointConfig"
+              }
+            },
+            "required": [
+              "name",
+              "type",
+              "config"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "DoubleCoupleJoint"
+              },
+              "config": {
+                "$ref": "#/definitions/DoubleCoupleJointConfig"
+              }
+            },
+            "required": [
+              "name",
+              "type",
+              "config"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "RJoint"
+              },
+              "config": {
+                "$ref": "#/definitions/RJointConfig"
+              }
+            },
+            "required": [
+              "name",
+              "type",
+              "config"
+            ]
+          }
+        ]
+      }
+    },
+    "properties": {
+      "adapters": {
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/Adapter"
+        }
+      },
+      "joints": {
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/Joint"
+        }
+      }
+    }
+  }
+}
