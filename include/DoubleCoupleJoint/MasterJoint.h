@@ -57,7 +57,7 @@ public:
         return motor1_->HasBrake() && motor2_->HasBrake();
     }
 
-    /** @brief 对两台电机控制抱闸：true 抱紧，false 释放，只有两台都成功才返回 true。 */
+    /** @brief 两次调用合帧：首条返回 true 表示缓存，第二条按最后值下发并返回双电机结果。 */
     bool Brake(bool enabled) override {
         RecordBrakeCommandForLog(enabled);
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -65,6 +65,12 @@ public:
             WarnProtection("Brake", "The current joint does not use brake-equipped motors");
             return false;
         }
+        if (!brake_batch_pending_) {
+            brake_batch_motion_calls_ = 0;
+            brake_batch_pending_ = true;
+            return true;
+        }
+        brake_batch_pending_ = false;
         // 即使第一台返回失败，也必须向第二台下发同一关节操作。
         const bool motor1_ok = motor1_->Brake(enabled);
         const bool motor2_ok = motor2_->Brake(enabled);
@@ -1056,12 +1062,20 @@ private:
         std::array<std::optional<AxisDynamicCommand>, 2> commands;
     };
 
+    // Each motion frame takes two calls; expire on the fifth call after a brake half-frame.
+    void AgeBrakeBatchLocked() {
+        if (brake_batch_pending_ && ++brake_batch_motion_calls_ > 4) {
+            brake_batch_pending_ = false;
+        }
+    }
+
     bool CanFeedbackRefreshTargetLocked() const {
         return !position_batch_ && !dynamic_batch_ && !position_target_feedback_lock_axis_;
     }
 
     /** @brief 取消候选命令；显式 Stop 同时清除已记住的轴指令。 */
     void ResetControlBatchLocked() {
+        brake_batch_pending_ = false;
         position_batch_.reset();
         dynamic_batch_.reset();
         dynamic_commands_ = {};
@@ -1212,6 +1226,7 @@ private:
     void ControlPVT(DoubleCoupleJointAxis axis, float kp, float kd, float pos, float spd,
                     float torque, PVTControlMode torque_mode) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
+        AgeBrakeBatchLocked();
         active_control_mode_ = "PVT";
         const auto params = AxisParams(axis);
         if (!IsValidPVTControlMode(torque_mode) || !std::isfinite(kp) || kp < 0.0f ||
@@ -1399,6 +1414,7 @@ private:
     void ControlPosition(DoubleCoupleJointAxis axis, float position, float speed, float current,
                          int feedback) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
+        AgeBrakeBatchLocked();
         active_control_mode_ = "PosControl";
         const auto params = AxisParams(axis);
         const double solver_position = params.reverse_ ? -position : position;
@@ -1535,6 +1551,7 @@ private:
     void ControlDynamic(DynamicControlMode mode, DoubleCoupleJointAxis axis, float command,
                         float current, int feedback) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
+        AgeBrakeBatchLocked();
         active_control_mode_ = mode == DynamicControlMode::Speed    ? "SpdControl"
                                : mode == DynamicControlMode::Torque ? "TorControl"
                                                                     : "CurControl";
@@ -1959,6 +1976,8 @@ private:
     float motor2_kt_{1.0f};
     AxisPVTCommand roll_pvt_command_{};
     AxisPVTCommand pitch_pvt_command_{};
+    bool brake_batch_pending_{false};
+    unsigned brake_batch_motion_calls_{0};
     std::optional<PositionBatch> position_batch_;
     std::optional<DynamicBatch> dynamic_batch_;
     std::array<std::array<std::optional<AxisDynamicCommand>, 2>, 3> dynamic_commands_{};

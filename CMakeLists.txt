@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 cmake_minimum_required(VERSION 3.20)
-project(joint_sdk VERSION 1.5.1 LANGUAGES CXX)
+project(joint_sdk VERSION 1.5.3 LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -278,4 +278,10 @@ if(JOINT_SDK_BUILD_TESTS)
     endif()
 
     gtest_discover_tests(joint_sdk_tests)
+    if(JOINT_SDK_BUILD_TOOLS AND NOT JOINT_SDK_BUILD_WASM_BINDINGS)
+        add_executable(joint_collector_tests tools/joint_sine_collector/collector_test.cc)
+        target_include_directories(joint_collector_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_link_libraries(joint_collector_tests PRIVATE joint_sdk::joint_sdk GTest::gtest_main)
+        gtest_discover_tests(joint_collector_tests)
+    endif()
 endif()

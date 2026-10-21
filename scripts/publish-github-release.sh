@@ -75,6 +75,7 @@ else
 fi
 
 MAIN_BRANCH=${MAIN_BRANCH:-${SOURCE_REF:-stable}}
+GITHUB_MAIN_BRANCH=${GITHUB_MAIN_BRANCH:-${MAIN_BRANCH}}
 OPTIONAL_BRANCHES=${OPTIONAL_BRANCHES:-}
 if [[ "${main_sha1_overridden}" == true ]]; then
   MAIN_SHA1=${main_sha1_override}
@@ -108,6 +109,8 @@ GITHUB_UPLOAD_URL=${GITHUB_UPLOAD_URL:-https://uploads.github.com}
 
 git check-ref-format --branch "${MAIN_BRANCH}" >/dev/null 2>&1 || \
   die "invalid main branch name: ${MAIN_BRANCH}"
+git check-ref-format --branch "${GITHUB_MAIN_BRANCH}" >/dev/null 2>&1 || \
+  die "invalid GitHub main branch name: ${GITHUB_MAIN_BRANCH}"
 if [[ -n "${MAIN_SHA1}" && ! "${MAIN_SHA1}" =~ ^[0-9a-fA-F]{40}$ ]]; then
   die "--main-sha1 must be a complete 40-character hexadecimal commit SHA1"
 fi
@@ -116,6 +119,7 @@ if [[ "${dry_run}" == true ]]; then
   printf 'Configuration is valid. No publication was performed.\n'
   printf '  Source: %s\n' "${SOURCE_REPO}"
   printf '  Main branch: %s\n' "${MAIN_BRANCH}"
+  printf '  GitHub main branch: %s\n' "${GITHUB_MAIN_BRANCH}"
   printf '  Main SHA1: %s\n' "${MAIN_SHA1:-<branch head>}"
   printf '  Optional branches: %s\n' "${OPTIONAL_BRANCHES:-<none>}"
   printf '  GitHub: %s\n' "${GITHUB_RELEASE_REPOSITORY}"
@@ -126,13 +130,17 @@ fi
 
 run_branch() {
   local source_branch=$1
+  local target_branch=${source_branch}
+  if [[ "${source_branch}" == "${MAIN_BRANCH}" ]]; then
+    target_branch=${GITHUB_MAIN_BRANCH}
+  fi
   shift
   "${script_dir}/release-to-github.sh" \
     --source-repo "${SOURCE_REPO}" \
     --source-ref "${source_branch}" \
     --github-repo "${GITHUB_RELEASE_REPOSITORY}" \
     --github-repo-url "${GITHUB_RELEASE_REPOSITORY_URL}" \
-    --github-branch "${source_branch}" \
+    --github-branch "${target_branch}" \
     --gitea-url "${GITEA_URL}" \
     --gitea-package-owner "${GITEA_PACKAGE_OWNER}" \
     --debian-distributions "${DEBIAN_DISTRIBUTIONS}" \

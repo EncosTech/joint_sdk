@@ -10,11 +10,11 @@
 - [构建](#构建)
 - [安装](#安装)
 - [测试](#测试)
+- [软同步发送](#软同步发送)
 - [Motor 文件日志](#motor-文件日志)
 - [关节保护与告警](#关节保护与告警)
 - [关节机械抱闸](#关节机械抱闸)
 - [ContinuousJoint 连续关节](#continuousjoint-连续关节)
-- [RJoint 零阻尼控制](#rjoint-零阻尼控制)
 - [JSON 配置创建](#json-配置创建)
 - [WASM 绑定](#wasm-绑定)
   - [构建 WASM](#构建-wasm)
@@ -72,7 +72,7 @@ cmake --build build
 
 ## 安装
 
-基础关节接口和零阻尼包装层均作为公共头文件安装：
+基础关节接口作为公共头文件安装：
 
 ```bash
 cmake -B build-install \
@@ -89,9 +89,6 @@ find_package(joint_sdk CONFIG REQUIRED)
 target_link_libraries(my_target PRIVATE joint_sdk::joint_sdk)
 ```
 
-`robot_identity` 独立拥有 Pinocchio-based `Robot` runtime、硬件采集和参数辨识流程；本 SDK
-只提供基础关节控制接口及零阻尼补偿包装层。
-
 ## 测试
 
 ```bash
@@ -99,6 +96,13 @@ target_link_libraries(my_target PRIVATE joint_sdk::joint_sdk)
 # 或
 cd build && ctest
 ```
+
+## 软同步发送
+
+`JointManager::SetAdaptersSyncMode(true)` 只对已创建关节实际使用的 bus 启用软同步，
+控制消息由 `Commit()` 按 bus 批量提交；传入 `false` 恢复这些 bus 的直接发送。
+后续成功创建关节时，新登记的 bus 继承当前设置。同一 adapter 上未使用的 bus，
+以及尚未被关节使用的 adapter，均不受影响。接口名称保留以兼容已有调用方。
 
 ## Motor 文件日志
 
@@ -237,7 +241,12 @@ C++ 从轴控制统一通过从轴的 `BaseJoint`/`SlaveJoint` 接口调用；�
 启动、释放和状态查询内部都会先调用 `HasBrake()`，调用方不必手动预检。不支持时输出包含关节名称的
 “The current joint does not use brake-equipped motors”告警，返回 `false`，不发送抱闸或状态查询命令。
 
-启动与释放直接使用驱动 `Motor::Brake()` 的结果。双电机无论从主关节还是从关节调用，都会分别操作两台电机；
+普通关节启动与释放直接使用驱动 `Motor::Brake()` 的结果。耦合关节抱闸按两次调用合帧：
+首条调用只缓存并返回 `true`（表示已接受，尚未执行），第二条调用按最后一次的 `enabled` 值分别操作两台电机；
+主、从各调用一次或同一轴连续调用两次均可完成一批。抱闸与运动控制独立合帧，互不打断，
+支持“轴1位置、轴1抱闸、轴2位置、轴2抱闸”的交错调用。抱闸半帧挂起后，
+其他控制调用超过两帧（每帧两次调用，即第五次调用）时取消抱闸半帧；跨控制模式累计计数。
+显式 `Stop` 也会取消抱闸半帧。完成合帧时，
 只有两台都返回成功才返回 `true`，第一台返回失败也会继续调用第二台，不执行回滚或额外状态复核。
 这是一次关节调用内的双电机操作，不保证两台电机在同一物理时刻动作。
 
@@ -248,6 +257,8 @@ C++ 从轴控制统一通过从轴的 `BaseJoint`/`SlaveJoint` 接口调用；�
 抱闸能力以驱动 `Motor::HasBrake()` 为准；当前驱动型号表的 `brake` 均为 `false`，实际型号启用需由驱动补齐标记。
 硬件带抱闸也不代表固件支持控制：驱动对于不支持抱闸命令的固件会直接返回失败。
 机械抱闸与 `Stop(MotorStopMode::FullBrake)` 的电气制动是不同操作。
+
+普通关节调用示例：
 
 ```cpp
 auto joint = manager.GetJoint("joint1");
@@ -262,6 +273,13 @@ const supported = joint.hasBrake()
 const engaged = await joint.brake(true)
 const brakeStatus = await joint.getBrakeStatus()
 const released = await joint.brake(false)
+```
+
+耦合关节需完成两次调用，例如：
+
+```cpp
+master->Brake(true);  // 首条仅缓存
+const bool engaged = slave->Brake(true);  // 合帧后控制两台电机
 ```
 
 ## ContinuousJoint 连续关节
@@ -289,39 +307,6 @@ auto joint = manager.AddJoint<encos::ContinuousJoint>("wheel", config);
 > `RJoint`、`ContinuousJoint`、双电机关节以及 Manager 的 `GetStatus(autoSend=true)`
 > 都可能在缓存缺失时发送零目标 PVT 反馈命令。关节运动过程中不得启用 `autoSend`，
 > 否则可能改变当前运动状态。
-
-## RJoint 零阻尼控制
-
-`ZeroDampingRJoint` 是与 `BaseJoint` 接口一致的 RJoint 包装层，内部以 1 kHz
-重发最近一条控制指令，并使用带因果速度低通和速度滞回的对称 Stribeck 模型。
-当前版本只支持 `RJoint`，实时补偿包含摩擦和关节侧等效惯量；重力参数不参与实时控制。惯量
-辨识值保持为物理参数，实时控制只使用标定文件中的保守比例并对惯量项单独限幅，避免完整
-`J * acceleration` 在滤波延迟下造成过强加速度反馈。
-
-- PVT、扭矩和电流模式叠加摩擦与惯量前馈；扭矩模式在底层按扭矩系数换算为电流控制，位置和
-  速度模式只按原指令重发。
-- 500 ms 没有新指令后切换到电流模式，只发送摩擦与惯量补偿。
-- 超时后不再使用历史指令判断静摩擦方向，但滤波后的实测速度超过启动阈值时会重新启动补偿。
-- 速度补偿尚未启动时，累计位置变化超过标定的位置意图死区会按移动方向输出 80% 的辨识静摩擦；
-  单个编码器计数不触发，连续 50 ms 没有新位移或速度达到启动阈值时会关闭该低速支路。
-- `Stop` 会锁存，直到收到下一条控制指令。
-- `GetStatus()` 和状态回调中的 `tor` 已扣除最近实际保留的摩擦与惯量补偿；接口不增加电流字段。
-
-```cpp
-#include "RJoint/ZeroDampingRJoint.h"
-
-auto control = nlohmann::json::parse(friction_json).at("joints").at(joint_name).at("control");
-auto zero_damping = std::make_shared<encos::ZeroDampingRJoint>(
-    raw_rjoint, encos::StribeckConfig::FromJson(control));
-
-zero_damping->TorControl(0.0f);
-```
-
-包装层是软实时控制，不提供操作系统级硬实时保证。销毁包装层时会停止工作线程并尝试对底层
-RJoint 执行 `FullBrake`。
-
-该包装层会真实启动电机并持续发送摩擦与惯量补偿力矩。使用前应确保急停可用、机械环境允许
-关节自由运动，并确认标定文件中的最大补偿力矩适合对应关节。补偿统一通过电流模式下发。
 
 ## JSON 配置创建
 

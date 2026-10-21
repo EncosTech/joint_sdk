@@ -129,11 +129,113 @@ TEST_P(BrakeJointTest, ControlsEntireJointAndReturnsDriverResult) {
     Create();
     for (const bool enabled : {true, false}) {
         adapter_->ClearCommandRecords();
+        if (IsCoupled()) {
+            EXPECT_TRUE(paired_joint_->Brake(enabled));
+            EXPECT_TRUE(adapter_->SnapshotCommandRecords().empty());
+        }
         EXPECT_TRUE(joint_->Brake(enabled));
         ExpectBrakeCommands(enabled);
         EXPECT_EQ(adapter_->Control().GetMotorSnapshot(0, 1).brake_enabled, enabled);
         if (IsCoupled()) {
             EXPECT_EQ(adapter_->Control().GetMotorSnapshot(0, 2).brake_enabled, enabled);
+        }
+    }
+}
+
+TEST_P(BrakeJointTest, CoupledBatchUsesLastValueAndAllowsSameAxis) {
+    if (!IsCoupled())
+        GTEST_SKIP();
+    Create();
+    for (const bool enabled : {false, true}) {
+        adapter_->ClearCommandRecords();
+        EXPECT_TRUE(joint_->Brake(!enabled));
+        EXPECT_TRUE(adapter_->SnapshotCommandRecords().empty());
+        EXPECT_TRUE(joint_->Brake(enabled));
+        ExpectBrakeCommands(enabled);
+    }
+}
+
+TEST_P(BrakeJointTest, StopCancelsBrakeBatch) {
+    if (!IsCoupled())
+        GTEST_SKIP();
+    Create();
+    EXPECT_TRUE(joint_->Brake(false));
+    joint_->Stop(MotorStopMode::FullBrake);
+    adapter_->ClearCommandRecords();
+    EXPECT_TRUE(paired_joint_->Brake(true));
+    EXPECT_TRUE(adapter_->SnapshotCommandRecords().empty());
+    EXPECT_TRUE(joint_->Brake(true));
+    ExpectBrakeCommands(true);
+}
+
+TEST_P(BrakeJointTest, InterleavedPositionAndBrakeCompleteIndependently) {
+    if (!IsCoupled())
+        GTEST_SKIP();
+    Create();
+    joint_->PosControl(0, 1, 0);
+    EXPECT_TRUE(joint_->Brake(true));
+    EXPECT_TRUE(adapter_->SnapshotCommandRecords().empty());
+    paired_joint_->PosControl(0, 1, 0);
+    const auto motion = adapter_->SnapshotCommandRecords();
+    ASSERT_EQ(motion.size(), 2U);
+    for (const auto& record : motion)
+        EXPECT_EQ(record.kind, FakeCommandKind::PosControl);
+    adapter_->ClearCommandRecords();
+    EXPECT_TRUE(paired_joint_->Brake(true));
+    ExpectBrakeCommands(true);
+
+    // Completing a brake batch must also preserve a pending position batch.
+    adapter_->ClearCommandRecords();
+    EXPECT_TRUE(joint_->Brake(false));
+    joint_->PosControl(0, 1, 0);
+    EXPECT_TRUE(paired_joint_->Brake(false));
+    ExpectBrakeCommands(false);
+    adapter_->ClearCommandRecords();
+    paired_joint_->PosControl(0, 1, 0);
+    const auto after_brake = adapter_->SnapshotCommandRecords();
+    ASSERT_EQ(after_brake.size(), 2U);
+    for (const auto& record : after_brake)
+        EXPECT_EQ(record.kind, FakeCommandKind::PosControl);
+}
+
+TEST_P(BrakeJointTest, BrakeHalfBatchExpiresOnlyAfterFourMotionCalls) {
+    if (!IsCoupled())
+        GTEST_SKIP();
+    Create();
+    auto motion = [&](int mode, const BaseJointPtr& axis) {
+        switch (mode) {
+            case 0:
+                axis->PVTControl(0, 0, 0, 0, 0);
+                break;
+            case 1:
+                axis->PosControl(0, 1, 0);
+                break;
+            case 2:
+                axis->SpdControl(0, 0);
+                break;
+            case 3:
+                axis->TorControl(0);
+                break;
+            case 4:
+                axis->CurControl(0);
+                break;
+        }
+    };
+    for (int mode = 0; mode < 6; ++mode) {
+        for (int calls = 0; calls <= 5; ++calls) {
+            SCOPED_TRACE(testing::Message() << "mode=" << mode << ", calls=" << calls);
+            joint_->Stop(MotorStopMode::FullBrake);
+            EXPECT_TRUE(joint_->Brake(false));
+            for (int i = 0; i < calls; ++i) {
+                motion(mode == 5 ? i % 5 : mode, i % 2 ? paired_joint_ : joint_);
+            }
+            adapter_->ClearCommandRecords();
+            EXPECT_TRUE(paired_joint_->Brake(true));
+            if (calls > 4) {
+                EXPECT_TRUE(adapter_->SnapshotCommandRecords().empty());
+                EXPECT_TRUE(joint_->Brake(true));
+            }
+            ExpectBrakeCommands(true);
         }
     }
 }
@@ -152,6 +254,10 @@ TEST_P(BrakeJointTest, DriverFailureReturnsFalseWithoutAdditionalCommands) {
     adapter_->SetReplyMode(FakeReplyMode::Manual);
     for (const bool enabled : {true, false}) {
         adapter_->ClearCommandRecords();
+        if (IsCoupled()) {
+            EXPECT_TRUE(paired_joint_->Brake(enabled));
+            EXPECT_TRUE(adapter_->SnapshotCommandRecords().empty());
+        }
         EXPECT_FALSE(joint_->Brake(enabled));
         ExpectBrakeCommands(enabled);
     }
@@ -223,6 +329,8 @@ TEST_P(BrakeJointTest, EitherMotorFailureStillCallsBothMotorsAndDoesNotRollBack)
                                                        : FakeReplyMode::Manual);
                 }
             });
+            EXPECT_TRUE(paired_joint_->Brake(enabled));
+            EXPECT_TRUE(records.empty());
             EXPECT_FALSE(joint_->Brake(enabled));
             adapter_->Control().ClearDecodedCommandObserver();
             ASSERT_EQ(records.size(), 2U);

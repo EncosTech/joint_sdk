@@ -133,7 +133,6 @@ public:
             // 既有实例已在注册表中，本次调用只为把 extend 增量应用到它
             return;
         }
-        adapter->SetSyncMode(sync_mode_enabled_);
         TrackAdapter(adapterName, std::move(adapter));
     }
 
@@ -494,15 +493,16 @@ public:
     }
 
     /**
-     * @brief 设置当前管理器下所有适配器的软同步发送模式
+     * @brief 设置当前管理器已创建关节所使用总线的软同步发送模式
      *
      * @param enabled true 时消息等待 Commit 批量发送；false 时恢复直接发送。
-     * 对已创建的所有适配器以及后续新创建的适配器均生效。
+     * 对已登记的总线及后续创建关节时新登记的总线生效，不修改未使用总线。
+     * 保留接口名称以兼容已有调用方。
      */
     void SetAdaptersSyncMode(bool enabled) {
         sync_mode_enabled_ = enabled;
-        for (auto& [_, adapter] : adapters_) {
-            adapter->SetSyncMode(enabled);
+        for (auto* bus : buses_) {
+            bus->SetSyncMode(enabled);
         }
     }
 
@@ -625,7 +625,10 @@ protected:
         if (!adapter || !*adapter) {
             throw std::invalid_argument(AdapterLookupError(motor_params));
         }
-        buses_.insert((*adapter)->GetBus(motor_params.BusIndex()));
+        auto* bus = (*adapter)->GetBus(motor_params.BusIndex());
+        if (buses_.insert(bus).second) {
+            bus->SetSyncMode(sync_mode_enabled_);
+        }
         MotorUniqueId id{motor_params.AdapterIdentityKey(), motor_params.BusIndex(),
                          motor_params.motorId};
         const auto [it, inserted] = motors_.emplace(std::move(id), motor);
@@ -743,8 +746,8 @@ protected:
         pending_pairs_;  ///< 待配对双电机关节（key → SlaveJoint）
     std::unordered_set<std::string> active_pairs_;  ///< 已配对的电机对 key
     bool motor_canfd_enabled_{false};               ///< 全局 CAN FD 标志
-    bool motor_canfd_override_{false};         ///< 全局 CAN FD 开关是否已被显式调用过
-    bool sync_mode_enabled_{false};            ///< 全局软同步发送模式标志
+    bool motor_canfd_override_{false};  ///< 全局 CAN FD 开关是否已被显式调用过
+    bool sync_mode_enabled_{false};     ///< 已使用总线及后续登记总线的软同步模式
     LogLevel log_level_{LogLevel::Info};       ///< 创建适配器时使用的日志级别
     LoggerPtr logger_{JointSdkLogger::Get()};  ///< 关节保护共享日志器
     std::filesystem::path log_path_;           ///< Motor 文件日志输出目录

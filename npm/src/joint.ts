@@ -81,7 +81,7 @@ export class JointWrapper {
     return this.native.jointHasBrake(this.handle)
   }
 
-  /** 控制整个关节的机械抱闸：true 抱紧，false 释放；所有电机操作成功才返回 true。 */
+  /** 控制机械抱闸：true 抱紧，false 释放；耦合独立两次调用合帧，首条 true 仅表示缓存，第二条按最后值下发并返回驱动结果；Stop 或第五次运动控制调用取消半帧。 */
   brake(enabled: boolean): Promise<boolean> {
     this.assertAlive()
     return this.native.jointBrake(this.handle, enabled)

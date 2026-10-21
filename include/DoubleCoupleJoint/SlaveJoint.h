@@ -32,7 +32,7 @@ public:
         return master_->HasBrake();
     }
 
-    /** @brief 委托主关节控制两台电机的抱闸：true 抱紧，false 释放。 */
+    /** @brief 委托主关节合帧控制抱闸：首条缓存，第二条按最后值下发两台电机。 */
     bool Brake(bool enabled) override {
         RecordBrakeCommandForLog(enabled);
         EnsureBound();

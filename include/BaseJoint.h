@@ -372,7 +372,10 @@ public:
     /**
      * @brief 控制整个关节的机械抱闸，内部先检查 HasBrake()。
      * @param enabled true 抱紧，false 释放，与 Motor::Brake() 一致。
-     * @return 所有电机操作均成功时返回 true；不支持时告警并返回 false。
+     * @return 所有电机操作均成功时返回 true；耦合首条调用返回 true 仅表示缓存成功。
+     *         不支持时告警并返回 false。
+     * @note 耦合关节抱闸独立两次调用合帧，按最后一次 enabled 下发。
+     *       Stop 或挂起后第五次运动控制调用取消抱闸半帧（两帧为四次调用）。
      * @note 默认实现不支持此操作；不执行失败回滚，驱动异常沿用原有异常通道。
      */
     virtual bool Brake(bool /*enabled*/) {

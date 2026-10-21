@@ -55,4 +55,35 @@ fi
 
 git -C "${repo_root}" check-ignore -q scripts/.env
 
+cp "${wrapper}" "${test_root}/publish-github-release.sh"
+cat >"${test_root}/release-to-github.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${WRAPPER_CALL_LOG}"
+while (($#)); do
+  if [[ "$1" == "--version-output-file" ]]; then
+    printf '1.5.1\n' >"$2"
+    shift 2
+  else
+    shift
+  fi
+done
+EOF
+chmod +x "${test_root}/release-to-github.sh"
+printf '\nMAIN_BRANCH=stable\nGITHUB_MAIN_BRANCH=main\n' >>"${valid_env}"
+export WRAPPER_CALL_LOG="${test_root}/calls"
+bash "${test_root}/publish-github-release.sh" --env-file "${valid_env}" >/dev/null
+mapfile -t calls <"${WRAPPER_CALL_LOG}"
+[[ "${#calls[@]}" == 3 ]]
+[[ "${calls[0]}" == *"--source-ref stable "* ]]
+[[ "${calls[0]}" == *"--github-branch main "* ]]
+[[ "${calls[1]}" == *"--source-ref develop "* ]]
+[[ "${calls[1]}" == *"--github-branch develop "* ]]
+[[ "${calls[2]}" == *"--github-branch feature-x "* ]]
+printf '\nGITHUB_MAIN_BRANCH=bad..branch\n' >>"${valid_env}"
+if bash "${wrapper}" --env-file "${valid_env}" --dry-run >/dev/null 2>&1; then
+  printf 'wrapper unexpectedly accepted an invalid GitHub branch\n' >&2
+  exit 1
+fi
+
 printf 'publish_github_release_wrapper_test: PASS\n'

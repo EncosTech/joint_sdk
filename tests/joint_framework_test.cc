@@ -1746,6 +1746,67 @@ TEST(JointManagerCommitTest, FlushesQueuedCommandsForEachUsedBus) {
     EXPECT_EQ(adapter->GetCommandRecords().size(), 2u);
 }
 
+TEST(JointManagerSyncTest, OnlyUsedBusesFollowManagerSyncMode) {
+    TestableJointManager manager;
+    auto adapter = CreateFakeAdapterHarness("manager_used_bus_sync");
+    manager.CreateAdapter("Fake", "manager_used_bus_sync");
+    const auto ranges = CreateMotorRanges();
+    RJoint::Config config{};
+    config.motorParams = MotorParams{"manager_used_bus_sync", 0, 1, MotorInitParams{ranges}};
+    config.limit = {-1.0f, 1.0f};
+    config.maxSpd = 2.0f;
+    config.maxTor = 3.0f;
+    auto joint = manager.AddJoint<RJoint>("used", config);
+    auto* unused = adapter->Adapter()->GetBus(1)->GetMotor(2, ranges);
+
+    manager.SetAdaptersSyncMode(true);
+    adapter->ClearCommandRecords();
+    joint->PosControl(0.1f);
+    unused->PosControl<0>(0.2f, 1.0f, 0.0f);
+    ASSERT_EQ(adapter->SnapshotCommandRecords().size(), 1U);
+    manager.Commit();
+    EXPECT_EQ(adapter->SnapshotCommandRecords().size(), 2U);
+
+    // Disabling the manager must not change an independently synchronized bus.
+    adapter->Adapter()->GetBus(1)->SetSyncMode(true);
+    manager.SetAdaptersSyncMode(false);
+    adapter->ClearCommandRecords();
+    joint->PosControl(0.1f);
+    unused->PosControl<0>(0.2f, 1.0f, 0.0f);
+    ASSERT_EQ(adapter->SnapshotCommandRecords().size(), 1U);
+    adapter->Adapter()->GetBus(1)->Commit();
+    EXPECT_EQ(adapter->SnapshotCommandRecords().size(), 2U);
+}
+
+TEST(JointManagerSyncTest, FutureBusesInheritModeWithoutChangingUnusedAdapters) {
+    TestableJointManager manager;
+    manager.SetAdaptersSyncMode(true);
+    auto adapter = CreateFakeAdapterHarness("manager_future_bus_sync");
+    manager.CreateAdapter("Fake", "manager_future_bus_sync");
+    auto other = CreateFakeAdapterHarness("manager_unused_adapter_sync");
+    manager.CreateAdapter("Fake", "manager_unused_adapter_sync");
+    const auto ranges = CreateMotorRanges();
+    auto* unused = other->Adapter()->GetBus(0)->GetMotor(1, ranges);
+    other->ClearCommandRecords();
+    unused->PosControl<0>(0.1f, 1.0f, 0.0f);
+    ASSERT_EQ(other->SnapshotCommandRecords().size(), 1U);
+
+    RJoint::Config config{};
+    config.motorParams = MotorParams{"manager_future_bus_sync", 0, 1, MotorInitParams{ranges}};
+    config.limit = {-1.0f, 1.0f};
+    config.maxSpd = 2.0f;
+    config.maxTor = 3.0f;
+    auto first = manager.AddJoint<RJoint>("first", config);
+    config.motorParams.busId = 1;
+    auto second = manager.AddJoint<RJoint>("second", config);
+    adapter->ClearCommandRecords();
+    first->PosControl(0.1f);
+    second->PosControl(0.2f);
+    EXPECT_TRUE(adapter->SnapshotCommandRecords().empty());
+    manager.Commit();
+    EXPECT_EQ(adapter->SnapshotCommandRecords().size(), 2U);
+}
+
 TEST(JointManagerLifetimeTest, RetainedJointRemainsUsableAfterManagerDestruction) {
     auto adapter = CreateFakeAdapterHarness("manager_lifetime_retained_joint");
     BaseJointPtr joint;
