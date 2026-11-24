@@ -33,7 +33,7 @@ sudo apt update
 sudo apt install -y \
   build-essential cmake git ninja-build pkg-config \
   libeigen3-dev \
-  libcap-dev libcap2-bin libzstd-dev libspdlog-dev libfmt-dev
+  libcap-dev libcap2-bin libzstd-dev libspdlog-dev libfmt-dev libsystemd-dev
 
 git clone --recurse-submodules \
   https://git.in.encos.cn/EncosRobotics-Stack/joint_sdk.git
@@ -41,12 +41,14 @@ cd joint_sdk
 git submodule update --init --recursive
 ```
 
-原生 joint_sdk 通过 CMake 查找已安装的 `encos_driver >= 4.0.0`。如果机器上尚未安装，
-先从源码安装到与 joint_sdk 相同的前缀：
+原生 joint_sdk 通过 CMake 查找已安装的 `encos_driver >= 4.0.0`。CI 使用驱动 4.3.1。
+如果机器上尚未安装，可将同一版本从源码安装到与 joint_sdk 相同的前缀：
 
 ```bash
-git clone --recurse-submodules \
+git clone \
   https://git.in.encos.cn/bismarckkk/motor_driver.git "$HOME/src/motor_driver"
+git -C "$HOME/src/motor_driver" checkout d7e5643d86865a24c46f7929ee1f37a421e22def
+git -C "$HOME/src/motor_driver" submodule update --init --recursive
 cmake -S "$HOME/src/motor_driver" -B "$HOME/src/motor_driver/build-install" \
   -DENCOS_ENABLE_INSTALL=ON \
   -DCMAKE_INSTALL_PREFIX="$HOME/.local"
@@ -180,8 +182,7 @@ driver 会为每台 Motor 生成对应的
 模式 0、2 的电机增益、速度和力矩协议限幅交给底层 `Motor::PVTControl`；饱和时两台
 电机独立限幅，不保证保持原来的耦合速度/力矩比例。模式 1 的 `TorControl` 没有相同的
 驱动限幅，故在任一电机发送前检查两台电机的输出范围和协议可编码性，越界拒绝整帧。
-PVT 目标位置仍须逆解成功且位于电机协议位置范围；关节/电机软件限位按实际位置和运动
-方向保护，实际位姿安全时允许目标超出软件位置限位。
+关节/电机软件限位按实际位置和运动方向保护，实际位姿安全时允许目标超出软件位置限位。
 模式 2 的电机 `Kd` 使用 `diag(Jᵀ Kd J)`，并根据实际速度反馈调整目标速度，使电机阻尼
 力矩匹配完整关节阻尼力矩，包含交叉耦合项。补偿后的目标速度超出电机协议范围时，
 拒绝整帧并保护，抛出 `JointException`。
@@ -351,7 +352,7 @@ encos::DefaultJointManager manager(config);  // 适配器与关节一次性建�
 
 ### 构建 WASM
 
-脚本会自动 `source "$HOME/emsdk/emsdk_env.sh"`，因此只需要确保 Emscripten SDK 安装在该路径：
+脚本会自动 `source "$HOME/emsdk/emsdk_env.sh"`，并通过 CMake 获取驱动 4.3.1：
 
 ```bash
 ./scripts/build-wasm.sh
@@ -490,3 +491,64 @@ tests/            # 测试代码
 项目自有源码采用 [MIT License](LICENSE)，第三方子模块和依赖保留原许可证。
 DEB 包包含完整 LICENSE 和 Debian copyright；npm 包声明 `license: MIT` 并包含完整 LICENSE。
 GitHub 发布入口为 `scripts/publish-github-release.sh`，配置模板为 `scripts/.env.example`。
+
+### Linux 跨发行版软件包
+
+原生 CI 沿用 motor_driver 的 glibc 2.28 基线：分别为 amd64、arm64 构建一次，
+生成 `jointsdk_<版本>_linux-glibc2.28_<架构>.deb/.rpm/.tar.gz`。同一候选包通过
+SHA-256 校验后，在 Ubuntu 22.04/24.04、AlmaLinux 8/9 上进行安装、CMake
+消费方编译、Fake 适配器运行和卸载检查；TGZ 还会在临时路径验证重定位。
+stable 分支版本变更且整个矩阵通过后，CI 将 SDK 原件和分架构校验清单保存到 Gitea
+通用包 `jointsdk-linux/<版本>`，并将 DEB/RPM 上传到软件包仓库。功能分支只生成 CI artifacts。
+GitHub 发布从通用仓库下载对应版本，校验两种架构的包后上传六个 Linux 软件包和一份
+`SHA256SUMS`。早于通用包上传的版本可用 `--main-sha1 <提交> --native-run-id <运行 ID>`
+从仍保留产物的 stable 原生 CI 运行中发布。工作流手动触发对应的输入为 `main_sha1` 和
+`native_run_id`。运行必须与所选源码提交一致，并已通过原生测试和发布 job。
+
+二进制兼容要求是 glibc >= 2.28、libstdc++ >= GCC 8，支持 x86_64/aarch64；
+不承诺 musl（如原生 Alpine）、glibc < 2.28 或未测试架构。其他满足基线的发行版
+可使用通用 TGZ，或在目标系统从源码构建。构建消费方还需要 CMake >= 3.20、
+C++17 编译器、Eigen >= 3.3.4（Debian 的 `libeigen3-dev` / RPM 的 `eigen3-devel`）。
+包依赖独立的 `libencosdriver >= 4.0.0`；CI artifact 同时提供本次构建使用的驱动包，
+安装 DEB/RPM 时应将两个包一起安装。TGZ 应将两个归档中的 `usr` 内容解压到同一前缀，
+并通过 `CMAKE_PREFIX_PATH`、`LD_LIBRARY_PATH=<前缀>/lib` 和
+`ENCOS_PLUGIN_PATH=<前缀>/lib/encosPlugins` 指定位置。使用驱动 4.3.1 的 TGZ 时，
+在目标系统安装 systemd 和 polkit 运行依赖（Ubuntu 的 `libsystemd0` / `polkitd`，
+AlmaLinux 的 `systemd-libs` / `polkit`）。
+
+本地发行版打包（自动检测可用的 dpkg-deb / rpmbuild，始终支持 TGZ）：
+
+```bash
+cmake -S . -B build-package -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+cmake --build build-package -j2
+(cd build-package && cpack)  # 也可显式 cpack -G DEB 或 cpack -G RPM
+```
+
+跨发行版发布构建必须使用 CI 中固定的 `jointsdk-ci-portable-glibc2.28` 镜像。进入镜像后，
+如果 `pkg-config --exists libsystemd` 未通过，先执行 `dnf install -y systemd-devel`。
+初始化两个仓库的子模块后执行 `bash scripts/portable/build.sh "$PWD/build-portable" /path/to/motor_driver`。
+脚本会检查 glibc 版本、审计 ELF 的 GLIBC/GLIBCXX/CXXABI 符号要求，并保存审计报告与校验和。
+
+CI 镜像使用 `jointsdk-ci-<variant>-20261104-v1-<arch>`，基础镜像摘要记录在
+`scripts/ci/images/bases.json`，已发布镜像摘要记录在 `scripts/ci/images/release-20261104-v1.json`，
+workflow 同时固定镜像版本和 digest。Eigen 和 Node 依赖预装在镜像中。原生 CI 按需补装驱动的
+systemd 开发依赖，包测试按需补装 systemd 和 polkit 运行依赖，再安装本轮生成的 SDK 和驱动候选包。
+Ubuntu 24.04 amd64 镜像同时预装 WASM 的锁定 Node 依赖及 Chromium；锁文件变化时，
+CI 会要求先构建新版本镜像，而不是临时联网安装。
+
+```bash
+# 在本机构建并推送镜像；省略 --push 则加载到本机 Docker。
+# VARIANT: portable-glibc2.28、22.04、24.04、almalinux-8、almalinux-9
+# ARCH: amd64、arm64；BUILDER 可选择支持该架构的本地 BuildKit builder。
+BUILDER=persistent bash scripts/ci/images/build.sh portable-glibc2.28 amd64 --push
+```
+
+更新依赖时更改 `RELEASE` 镜像版本，构建所需架构镜像，并同步 workflow 中的镜像版本及 digest。
+
+安装的 SDK 头文件统一位于 `<prefix>/include/jointsdk/`，其中包含
+`boost/preprocessor/` 和 `couple_joint/`，不会写入系统的 `include/boost/`。
+使用 `joint_sdk::joint_sdk` 的 CMake 消费者无需修改现有 `#include "JointManager.h"`；
+手工设置编译参数时，需将 include 路径调整为 `include/jointsdk`，求解器头文件路径为
+`include/jointsdk/couple_joint`。这隔离了安装文件，不隔离同一编译单元中的 Boost 宏。
+通过 DEB/RPM 升级时由包管理器清理旧包路径；以前通过 `cmake --install` 手工安装的版本，
+应依据旧的 `install_manifest.txt` 核对文件归属后清理，不能直接删除系统 Boost 目录。

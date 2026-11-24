@@ -1,0 +1,12 @@
+{
+  "git.in.encos.cn/container/ubuntu:jointsdk-ci-22.04-20261104-v1-amd64": "sha256:5a0ed96467c82a3feaf1b33ce4f07873e197b7b8898ad27afce0dc8d41d2bbe1",
+  "git.in.encos.cn/container/ubuntu:jointsdk-ci-22.04-20261104-v1-arm64": "sha256:0bfc0e1ae9f4080abab3ec6f99633086855b5c0d992b48f0ee64833f2c51ab7b",
+  "git.in.encos.cn/container/ubuntu:jointsdk-ci-24.04-20261104-v1-amd64": "sha256:dd985021fca36db94cbc9bb4930e02a806ec89730ff67e01461930540ccfa12f",
+  "git.in.encos.cn/container/ubuntu:jointsdk-ci-24.04-20261104-v1-arm64": "sha256:88ad327f3093f3f613315e5c01939da699460a3d3c8543c22aad7e9b97927712",
+  "git.in.encos.cn/container/ubuntu:jointsdk-ci-portable-glibc2.28-20261104-v1-amd64": "sha256:85e4455e01749cfbcd55b102eaff9bf337aabff514d5af6221a753c902821a8d",
+  "git.in.encos.cn/container/ubuntu:jointsdk-ci-portable-glibc2.28-20261104-v1-arm64": "sha256:dbd477e398dc0e110c05d692a6b90f6e1f687c0f4445d9c54e150530acb00632",
+  "git.in.encos.cn/container/ubuntu:jointsdk-ci-almalinux-8-20261104-v1-amd64": "sha256:976a71a1b21c09d08c7fb0c779f6f4e5dde3dc1d259c92fe304d5fc98781f268",
+  "git.in.encos.cn/container/ubuntu:jointsdk-ci-almalinux-8-20261104-v1-arm64": "sha256:36cfd2ba97078a616a3887e072c72d518fafdcd390e23127d6589ae02860f9be",
+  "git.in.encos.cn/container/ubuntu:jointsdk-ci-almalinux-9-20261104-v1-amd64": "sha256:20b04d415fd59f1a62d96b2632866846a638668eaea30597733b55fe519adf34",
+  "git.in.encos.cn/container/ubuntu:jointsdk-ci-almalinux-9-20261104-v1-arm64": "sha256:add0bcf74882300a2e14280b7388d2b43d0befed31b93647bddbeccb445fe37c"
+}

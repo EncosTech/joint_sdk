@@ -81,12 +81,90 @@ mkdir -p "${fake_bin}"
 curl_log="${test_root}/curl.log"
 export CURL_LOG="${curl_log}"
 export TARGET_BARE="${target_bare}"
+export TEST_REGISTRY="${test_root}/registry"
+export TEST_RELEASE_ASSETS="${test_root}/release-assets"
+mkdir -p "${TEST_REGISTRY}" "${TEST_RELEASE_ASSETS}"
+candidate_root="${test_root}/candidate"
+for arch in amd64 arm64; do
+  candidate="${candidate_root}/${arch}"
+  mkdir -p "${candidate}"
+  for suffix in deb rpm tar.gz; do
+    printf 'original SDK package %s/%s\n' "${arch}" "${suffix}" \
+      >"${candidate}/jointsdk_3.2.0_linux-glibc2.28_${arch}.${suffix}"
+    printf 'pinned driver package %s/%s\n' "${arch}" "${suffix}" \
+      >"${candidate}/libencosdriver_4.1.2_linux-glibc2.28_${arch}.${suffix}"
+  done
+  printf '{}\n' >"${candidate}/jointsdk-elf-audit.json"
+  (cd "${candidate}" && sha256sum ./*.deb ./*.rpm ./*.tar.gz ./*.json) >"${candidate}/SHA256SUMS"
+done
+
+python3 -B - "${repo_root}" "${candidate_root}" "${test_root}" <<'PY'
+import importlib.util
+import io
+import json
+from pathlib import Path
+import sys
+from unittest.mock import patch
+import zipfile
+
+repo, candidates, work = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("download_artifact", repo / "scripts/ci/download-artifact.py")
+downloader = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(downloader)
+
+base = downloader.native_run_api("https://gitea.test", "https://gitea.test/acme/source.git")
+run_id = 2446
+sha = "a" * 40
+run_url = f"{base}/actions/runs/{run_id}"
+run = dict(id=run_id, path="build-native.yml@refs/heads/stable", event="push", head_branch="stable",
+           head_sha=sha, status="completed", conclusion="success")
+jobs = {"jobs": [{"name": "publish-tested-packages", "conclusion": "success"}]}
+artifacts = []
+archives = {}
+for artifact_id, arch in enumerate(("amd64", "arm64"), start=1):
+    artifacts.append({"id": artifact_id, "name": f"jointsdk-portable-{arch}-{sha}", "expired": False,
+                      "workflow_run": {"id": run_id, "head_sha": sha}})
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as package:
+        for path in (candidates / arch).iterdir():
+            package.write(path, arcname=path.name)
+    archives[f"{base}/actions/artifacts/{artifact_id}/zip"] = archive.getvalue()
+
+
+def get(url, auth):
+    if url == run_url:
+        return json.dumps(run).encode()
+    if url == f"{run_url}/jobs":
+        return json.dumps(jobs).encode()
+    if url == f"{run_url}/artifacts":
+        return json.dumps({"artifacts": artifacts}).encode()
+    return archives[url]
+
+
+with patch.object(downloader, "get", side_effect=get) as request:
+    wrong_destination = work / "wrong-run"
+    try:
+        downloader.download_native_run(base, run_id, "b" * 40, wrong_destination, "Basic test")
+    except ValueError as error:
+        assert "selected commit" in str(error)
+    else:
+        raise AssertionError("unexpectedly accepted a native workflow run for a different SHA")
+    assert request.call_count == 1 and not wrong_destination.exists()
+    downloader.download_native_run(base, run_id, sha, work / "historical-candidate", "Basic test")
+PY
+
+mkdir "${test_root}/historical-release"
+python3 "${repo_root}/scripts/portable/release-packages.py" \
+  stage "${test_root}/historical-candidate" 3.2.0 "${test_root}/historical-release"
+(cd "${test_root}/historical-release" && sha256sum --strict -c SHA256SUMS)
 
 cat >"${fake_bin}/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
 output=""
+data_binary=""
+upload_file=""
 url=""
 method="GET"
 while (($#)); do
@@ -99,7 +177,16 @@ while (($#)); do
       method=$2
       shift 2
       ;;
-    --header|-H|--data|--data-binary)
+    --header|-H|--data|--user|--write-out|--proto-redir)
+      shift 2
+      ;;
+    --data-binary)
+      data_binary=$2
+      shift 2
+      ;;
+    --upload-file)
+      method="PUT"
+      upload_file=$2
       shift 2
       ;;
     --fail|--fail-with-body|--silent|--show-error|--location)
@@ -117,85 +204,29 @@ done
 
 printf '%s %s\n' "${method}" "${url}" >>"${CURL_LOG}"
 case "${url}" in
-  */dists/jammy/*/binary-amd64/Packages)
-    cat >"${output}" <<'PACKAGES'
-Package: unrelated
-Version: 3.2.0
-Architecture: amd64
-Filename: pool/unrelated.deb
-Size: 9
-SHA256: b65ab1ed14ad372bfc5603e921bad94b9843ecfa709b9b988dea6ce4624ee581
-
-Package: jointsdk
-Version: 3.2.0
-Architecture: amd64
-Filename: pool/jammy/main/l/jointsdk/jointsdk_3.2.0_amd64.deb
-Size: 9
-SHA256: b65ab1ed14ad372bfc5603e921bad94b9843ecfa709b9b988dea6ce4624ee581
-
-PACKAGES
-    ;;
-  */dists/jammy/*/binary-arm64/Packages)
-    if [[ "${MISSING_ARM64:-}" == 1 ]]; then
-      : >"${output}"
+  https://*/api/packages/packages/generic/jointsdk-linux/3.2.0/*)
+    name=${url##*/}
+    if [[ "${method}" == PUT ]]; then
+      if [[ -f "${TEST_REGISTRY}/${name}" ]]; then
+        printf '409'
+        exit 22
+      fi
+      cp "${upload_file}" "${TEST_REGISTRY}/${name}"
+      printf '201'
       exit 0
     fi
-    cat >"${output}" <<'PACKAGES'
-Package: unrelated
-Version: 3.2.0
-Architecture: amd64
-Filename: pool/unrelated.deb
-Size: 9
-SHA256: b65ab1ed14ad372bfc5603e921bad94b9843ecfa709b9b988dea6ce4624ee581
-
-Package: jointsdk
-Version: 3.2.0
-Architecture: arm64
-Filename: pool/jammy/main/l/jointsdk/jointsdk_3.2.0_arm64.deb
-Size: 9
-SHA256: b65ab1ed14ad372bfc5603e921bad94b9843ecfa709b9b988dea6ce4624ee581
-
-PACKAGES
-    ;;
-  */dists/noble/*/binary-amd64/Packages)
-    cat >"${output}" <<'PACKAGES'
-Package: unrelated
-Version: 3.2.0
-Architecture: amd64
-Filename: pool/unrelated.deb
-Size: 9
-SHA256: b65ab1ed14ad372bfc5603e921bad94b9843ecfa709b9b988dea6ce4624ee581
-
-Package: jointsdk
-Version: 3.2.0
-Architecture: amd64
-Filename: pool/noble/main/l/jointsdk/jointsdk_3.2.0_amd64.deb
-Size: 9
-SHA256: b65ab1ed14ad372bfc5603e921bad94b9843ecfa709b9b988dea6ce4624ee581
-
-PACKAGES
-    ;;
-  */dists/noble/*/binary-arm64/Packages)
-    if [[ "${MISSING_ARM64:-}" == 1 ]]; then
-      : >"${output}"
-      exit 0
+    if [[ "${name}" == SHA256SUMS-arm64 && "${MISSING_ARM64:-}" == 1 ]]; then
+      exit 22
     fi
-    cat >"${output}" <<'PACKAGES'
-Package: unrelated
-Version: 3.2.0
-Architecture: amd64
-Filename: pool/unrelated.deb
-Size: 9
-SHA256: b65ab1ed14ad372bfc5603e921bad94b9843ecfa709b9b988dea6ce4624ee581
-
-Package: jointsdk
-Version: 3.2.0
-Architecture: arm64
-Filename: pool/noble/main/l/jointsdk/jointsdk_3.2.0_arm64.deb
-Size: 9
-SHA256: b65ab1ed14ad372bfc5603e921bad94b9843ecfa709b9b988dea6ce4624ee581
-
-PACKAGES
+    cp "${TEST_REGISTRY}/${name}" "${output}"
+    if [[ "${name}" == *_arm64.rpm && "${CORRUPT_ARM64:-}" == 1 ]]; then
+      printf 'corrupt\n' >>"${output}"
+    fi
+    ;;
+  https://git.in.encos.cn/api/packages/packages/debian/pool/*/main/upload|\
+    https://git.in.encos.cn/api/packages/packages/rpm/upload)
+    test "${method}" = PUT
+    printf '201'
     ;;
   */repos/acme/mirror/releases)
     printf '{"id":42,"upload_url":"https://uploads.github.test/repos/acme/mirror/releases/42/assets{?name,label}"}\n'
@@ -211,10 +242,8 @@ PACKAGES
     if [[ "${FAIL_UPLOAD:-}" == 1 ]]; then
       exit 22
     fi
+    cp "${data_binary#@}" "${TEST_RELEASE_ASSETS}/${url##*name=}"
     printf '{"state":"uploaded"}\n'
-    ;;
-  *.deb)
-    printf 'fake deb\n' >"${output}"
     ;;
   *)
     printf 'unexpected URL: %s\n' "${url}" >&2
@@ -223,6 +252,35 @@ PACKAGES
 esac
 EOF
 chmod +x "${fake_bin}/curl"
+
+publish_candidates() {
+  PATH="${fake_bin}:${PATH}" USER_PASSWORD="gitea-token" \
+    bash "${repo_root}/scripts/portable/publish.sh" "${candidate_root}"
+}
+
+printf 'modified audit\n' >>"${candidate_root}/arm64/jointsdk-elf-audit.json"
+if publish_candidates; then
+  printf 'native publication unexpectedly accepted a corrupt candidate\n' >&2
+  exit 1
+fi
+test ! -s "${curl_log}"
+printf '{}\n' >"${candidate_root}/arm64/jointsdk-elf-audit.json"
+
+publish_candidates
+for arch in amd64 arm64; do
+  for file in "${candidate_root}/${arch}"/jointsdk_*; do
+    cmp "${file}" "${TEST_REGISTRY}/${file##*/}"
+  done
+  (cd "${TEST_REGISTRY}" && sha256sum --strict -c "SHA256SUMS-${arch}")
+done
+test "$(find "${TEST_REGISTRY}" -type f | wc -l)" -eq 8
+test "$(sed -n '7,8p' "${curl_log}" | grep -c 'generic/jointsdk-linux/3.2.0/SHA256SUMS-')" -eq 2
+test "$(grep -c '/debian/pool/' "${curl_log}")" -eq 4
+test "$(grep -c '/rpm/upload' "${curl_log}")" -eq 2
+
+: >"${curl_log}"
+publish_candidates
+test "$(grep -c '^GET .*generic/jointsdk-linux/3.2.0/' "${curl_log}")" -eq 8
 
 run_release() {
   PATH="${fake_bin}:${PATH}" \
@@ -240,8 +298,6 @@ run_release() {
       --github-upload-url https://uploads.github.test \
       --gitea-url https://gitea.test \
       --gitea-package-owner packages \
-      --debian-distributions jammy,noble \
-      --debian-architectures amd64,arm64 \
       "$@"
 }
 
@@ -266,9 +322,11 @@ done
 test ! -e "${mirror_checkout}/external/example/.git"
 test ! -e "${mirror_checkout}/external/example/vendor/leaf/.git"
 test "$(git -C "${mirror_checkout}" log -1 --format=%s)" = "release: 发布v3.2.0"
-test "$(grep -c 'uploads.github.test.*/assets' "${curl_log}")" -eq 4
-grep -q 'name=jointsdk_3.2.0_amd64_jammy.deb' "${curl_log}"
-grep -q 'name=jointsdk_3.2.0_amd64_noble.deb' "${curl_log}"
+test "$(grep -c 'uploads.github.test.*/assets' "${curl_log}")" -eq 7
+for name in "${TEST_REGISTRY}"/jointsdk_*; do
+  cmp "${name}" "${TEST_RELEASE_ASSETS}/${name##*/}"
+done
+(cd "${TEST_RELEASE_ASSETS}" && sha256sum --strict -c SHA256SUMS)
 grep -q 'PATCH https://api.github.test/repos/acme/mirror/releases/42' "${curl_log}"
 
 commit_count_before=$(git --git-dir="${target_bare}" rev-list --count main)
@@ -299,8 +357,6 @@ GITHUB_RELEASE_REPOSITORY=acme/mirror
 GITHUB_RELEASE_REPOSITORY_URL=${target_bare}
 GITEA_URL=https://gitea.test
 GITEA_PACKAGE_OWNER=packages
-DEBIAN_DISTRIBUTIONS=jammy,noble
-DEBIAN_ARCHITECTURES=amd64,arm64
 GITHUB_API_URL=https://api.github.test
 GITHUB_UPLOAD_URL=https://uploads.github.test
 EOF
@@ -363,6 +419,15 @@ missing_status=$?
 set -e
 test "${missing_status}" -ne 0
 test "$(git --git-dir="${target_bare}" rev-list --count main)" = "${commit_count_after}"
+test "$(grep -c 'github.test' "${curl_log}" || true)" -eq 0
+
+: >"${curl_log}"
+if CORRUPT_ARM64=1 run_release; then
+  printf 'release unexpectedly accepted a corrupt RPM\n' >&2
+  exit 1
+fi
+test "$(git --git-dir="${target_bare}" rev-list --count main)" = "${commit_count_after}"
+test "$(grep -c 'github.test' "${curl_log}" || true)" -eq 0
 
 : >"${curl_log}"
 set +e
@@ -402,8 +467,3 @@ for unsafe_url in "${unsafe_urls[@]}"; do
 done
 
 printf 'release_to_github_test: PASS\n'
-
-if grep -q "unrelated.deb" "${curl_log}"; then
-  echo "Unrelated Debian package was requested" >&2
-  exit 1
-fi

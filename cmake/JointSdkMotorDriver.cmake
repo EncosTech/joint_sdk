@@ -27,7 +27,7 @@ function(joint_sdk_resolve_motor_driver)
         FetchContent_Declare(
             encos_driver
             GIT_REPOSITORY https://git.in.encos.cn/bismarckkk/motor_driver.git
-            GIT_TAG origin/main
+            GIT_TAG d7e5643d86865a24c46f7929ee1f37a421e22def # 4.3.1
             GIT_SUBMODULES_RECURSE TRUE
         )
         FetchContent_MakeAvailable(encos_driver)

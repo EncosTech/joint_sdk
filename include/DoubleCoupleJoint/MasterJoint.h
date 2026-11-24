@@ -843,6 +843,17 @@ private:
         return std::isfinite(*motor1_torque) && std::isfinite(*motor2_torque);
     }
 
+    // 两台电机统一缩放，避免分别截断后改变关节力矩方向。
+    double MotorTorqueScale(double torque1, double torque2) const {
+        const auto scale = [](double value, const Range<float>& range) {
+            const double lower = std::max(-327.68, static_cast<double>(range.min));
+            const double upper = std::min(327.67, static_cast<double>(range.max));
+            return value > upper ? upper / value : value < lower ? lower / value : 1.0;
+        };
+        return std::min(scale(torque1, motor1_ranges_.torque),
+                        scale(torque2, motor2_ranges_.torque));
+    }
+
     /**
      * @brief 将两轴关节增益按 diag(J^T K J) 转换为两台电机的独立增益。
      */
@@ -1042,6 +1053,7 @@ private:
      * @param pose_solver 已求解到目标位姿的求解器副本。
      */
     void CommitTargetPose(const JointPose& pose, const couple_joint::MechanismSolver& pose_solver) {
+        host_pvt_target_.reset();
         *solver_ = pose_solver;
         target_roll_ = pose.roll;
         target_pitch_ = pose.pitch;
@@ -1075,6 +1087,7 @@ private:
 
     /** @brief 取消候选命令；显式 Stop 同时清除已记住的轴指令。 */
     void ResetControlBatchLocked() {
+        host_pvt_target_.reset();
         brake_batch_pending_ = false;
         position_batch_.reset();
         dynamic_batch_.reset();
@@ -1206,6 +1219,7 @@ private:
             return false;
         }
         const auto state = feedback_solver.GetState();
+        host_pvt_target_.reset();
         *solver_ = feedback_solver;
         target_roll_ = state.roll;
         target_pitch_ = state.pitch;
@@ -1214,7 +1228,8 @@ private:
 
     /**
      * @brief PVT 控制模式：目标角度不按软件限位裁剪，实际电机或虚拟关节位置进入保护区后
-     * 拦截继续向外或深入奇异区的命令。
+     * 拦截继续向外或深入奇异区的命令。模式 1/2 仅使用实际姿态映射完整 PD 力矩，
+     * 不要求期望位置可逆解；模式 0（含反馈不足时的回退）仍验证目标可达性。
      * @param axis 被控制的输出轴。
      * @param kp 位置比例增益。
      * @param kd 速度微分增益。
@@ -1231,12 +1246,14 @@ private:
         const auto params = AxisParams(axis);
         if (!IsValidPVTControlMode(torque_mode) || !std::isfinite(kp) || kp < 0.0f ||
             !std::isfinite(kd) || kd < 0.0f || !std::isfinite(pos) || !std::isfinite(spd) ||
-            !std::isfinite(torque) || std::abs(spd) > params.maxSpd_ ||
-            std::abs(torque) > params.maxTor_) {
+            !std::isfinite(torque) || std::abs(spd) > params.maxSpd_) {
             WarnProtection(active_control_mode_, "invalid PVT input");
             ProtectLocked(1);
             throw std::invalid_argument("DoubleCoupleJoint invalid PVT input");
         }
+
+        torque = ClampControl(torque, -params.maxTor_, params.maxTor_, active_control_mode_,
+                              "joint torque", AxisScope(axis));
 
         // 首条命令只写候选，两次调用仍可来自同一个轴。
         if (dynamic_batch_) {
@@ -1245,12 +1262,15 @@ private:
         }
         const bool first = !position_batch_;
         if (first) {
-            position_batch_ = PositionBatch{{target_roll_, target_pitch_},
-                                            roll_pvt_command_,
-                                            pitch_pvt_command_,
-                                            {},
-                                            {},
-                                            torque_mode};
+            position_batch_ =
+                PositionBatch{torque_mode != PVTControlMode::MotorPVT && host_pvt_target_
+                                  ? *host_pvt_target_
+                                  : JointPose{target_roll_, target_pitch_},
+                              roll_pvt_command_,
+                              pitch_pvt_command_,
+                              {},
+                              {},
+                              torque_mode};
         }
         auto& pending = *position_batch_;
         SetAxisValue(axis, params.reverse_ ? -pos : pos, &pending.target);
@@ -1273,28 +1293,8 @@ private:
             throw JointException(JointError::kDoubleCoupleJointSolveFailed,
                                  "DoubleCoupleJoint actual motor pose is unavailable");
         }
-        auto target_solver = *solver_;
-        const auto inverse = target_solver.SolveInverse(batch.target.roll, batch.target.pitch);
-        const auto target_state = target_solver.GetState();
-        MotorPositions positions{
-            NormalizeMotorPosition(target_state.theta1 - solver_parameters_.initial_theta1,
-                                   "motor1"),
-            NormalizeMotorPosition(target_state.theta2 - solver_parameters_.initial_theta2,
-                                   "motor2")};
-        const bool target_valid = IsExecutableSolveResult(inverse.status, inverse.transmission) &&
-                                  MotorPositionsInPVTRange(positions);
-        LogProtection(active_control_mode_, "target inverse solve/protocol range rejected",
-                      !target_valid, {}, AxisScope(axis));
-        if (!target_valid) {
-            position_target_feedback_lock_axis_ = axis;
-            ProtectLocked(1, actual->positions);
-            return;
-        }
-        position_target_feedback_lock_axis_.reset();
-
         PVTControlMode mode =
             batch.pvt_mode == torque_mode ? torque_mode : PVTControlMode::MotorPVT;
-        JointPose joint_torque{batch.roll_pvt.torque, batch.pitch_pvt.torque};
         couple_joint::VelocityTorqueResult velocity{};
         bool velocity_available = false;
         if (feedback_solved && std::isfinite(motor1_status->speed) &&
@@ -1310,41 +1310,98 @@ private:
                           !host_available);
             if (!host_available) {
                 mode = PVTControlMode::MotorPVT;
-            } else {
-                joint_torque.roll += batch.roll_pvt.kp * (batch.target.roll - actual->pose.roll);
-                joint_torque.pitch +=
-                    batch.pitch_pvt.kp * (batch.target.pitch - actual->pose.pitch);
-                if (mode == PVTControlMode::HostTorque) {
-                    joint_torque.roll += batch.roll_pvt.kd * (batch.roll_pvt.speed - velocity.roll);
-                    joint_torque.pitch +=
-                        batch.pitch_pvt.kd * (batch.pitch_pvt.speed - velocity.pitch);
-                }
-                if (!std::isfinite(joint_torque.roll) || !std::isfinite(joint_torque.pitch) ||
-                    std::abs(joint_torque.roll) > AxisParams(DoubleCoupleJointAxis::Roll).maxTor_ ||
-                    std::abs(joint_torque.pitch) >
-                        AxisParams(DoubleCoupleJointAxis::Pitch).maxTor_) {
-                    ProtectLocked(1, actual->positions);
-                    throw JointException(JointError::kDoubleCoupleJointSolveFailed,
-                                         "DoubleCoupleJoint host torque exceeds joint limits");
-                }
             }
         }
 
-        // 数学映射不再改变幅度，PVT 的协议饱和由底层电机 SDK 完成。
-        float speed1, speed2, torque1, torque2, kp1, kp2, kd1, kd2;
-        if (!MapJointSpeed(actual->solver, batch.roll_pvt.speed, batch.pitch_pvt.speed, &speed1,
-                           &speed2) ||
-            !MapJointTorque(actual->solver, joint_torque.roll, joint_torque.pitch, &torque1,
+        // 仅最终执行电机位置闭环时需要目标逆解；模式回退同样经过此检查。
+        auto target_solver = *solver_;
+        MotorPositions positions = actual->positions;
+        if (mode == PVTControlMode::MotorPVT) {
+            const auto inverse = target_solver.SolveInverse(batch.target.roll, batch.target.pitch);
+            const auto target_state = target_solver.GetState();
+            positions = {NormalizeMotorPosition(
+                             target_state.theta1 - solver_parameters_.initial_theta1, "motor1"),
+                         NormalizeMotorPosition(
+                             target_state.theta2 - solver_parameters_.initial_theta2, "motor2")};
+            const bool target_valid =
+                IsExecutableSolveResult(inverse.status, inverse.transmission) &&
+                MotorPositionsInPVTRange(positions);
+            LogProtection(active_control_mode_, "target inverse solve/protocol range rejected",
+                          !target_valid, {}, AxisScope(axis));
+            if (!target_valid) {
+                position_target_feedback_lock_axis_ = axis;
+                ProtectLocked(1, actual->positions);
+                return;
+            }
+        } else {
+            LogProtection(active_control_mode_, "target inverse solve/protocol range rejected",
+                          false, {}, AxisScope(axis));
+        }
+        position_target_feedback_lock_axis_.reset();
+
+        auto roll_pvt = batch.roll_pvt;
+        auto pitch_pvt = batch.pitch_pvt;
+        JointPose joint_torque{batch.roll_pvt.torque, batch.pitch_pvt.torque};
+        JointPose total_joint_torque = joint_torque;
+        if (mode != PVTControlMode::MotorPVT) {
+            joint_torque.roll += batch.roll_pvt.kp * (batch.target.roll - actual->pose.roll);
+            joint_torque.pitch += batch.pitch_pvt.kp * (batch.target.pitch - actual->pose.pitch);
+            total_joint_torque = {
+                joint_torque.roll + batch.roll_pvt.kd * (batch.roll_pvt.speed - velocity.roll),
+                joint_torque.pitch + batch.pitch_pvt.kd * (batch.pitch_pvt.speed - velocity.pitch)};
+            if (mode == PVTControlMode::HostTorque) {
+                joint_torque = total_joint_torque;
+            }
+            const auto saturate = [&](DoubleCoupleJointAxis output_axis, double& feedforward,
+                                      double& total, AxisPVTCommand& command) {
+                if (!std::isfinite(feedforward) || !std::isfinite(total)) {
+                    ProtectLocked(1, actual->positions);
+                    throw JointException(JointError::kDoubleCoupleJointSolveFailed,
+                                         "DoubleCoupleJoint host torque is not finite");
+                }
+                const double limit = AxisParams(output_axis).maxTor_;
+                const double peak = std::max(std::abs(feedforward), std::abs(total));
+                const double scale = peak > limit ? limit / peak : 1.0;
+                LogProtection(active_control_mode_, "host torque saturation", scale < 1.0, {},
+                              AxisScope(output_axis));
+                // 模式 2 同步缩放前馈和 Kd，保持 PD 各项抵消关系。
+                feedforward *= scale;
+                total *= scale;
+                command.kd *= scale;
+            };
+            saturate(DoubleCoupleJointAxis::Roll, joint_torque.roll, total_joint_torque.roll,
+                     roll_pvt);
+            saturate(DoubleCoupleJointAxis::Pitch, joint_torque.pitch, total_joint_torque.pitch,
+                     pitch_pvt);
+        }
+
+        float speed1 = 0.0f, speed2 = 0.0f, torque1, torque2;
+        float kp1 = 0.0f, kp2 = 0.0f, kd1 = 0.0f, kd2 = 0.0f;
+        // 全上位机力矩模式不需要电机速度目标及增益映射。
+        if (!MapJointTorque(actual->solver, joint_torque.roll, joint_torque.pitch, &torque1,
                             &torque2) ||
-            !MapPVTGains(actual->solver, batch.roll_pvt, batch.pitch_pvt, &kp1, &kp2, &kd1, &kd2)) {
+            (mode != PVTControlMode::HostTorque &&
+             !MapPVTGains(actual->solver, roll_pvt, pitch_pvt, &kp1, &kp2, &kd1, &kd2)) ||
+            (mode == PVTControlMode::MotorPVT &&
+             !MapJointSpeed(actual->solver, batch.roll_pvt.speed, batch.pitch_pvt.speed, &speed1,
+                            &speed2))) {
             ProtectLocked(1, actual->positions);
             throw JointException(JointError::kDoubleCoupleJointSolveFailed,
                                  "DoubleCoupleJoint PVT mapping failed");
         }
         if (mode == PVTControlMode::HostKpMotorKd) {
-            if (!MatchCoupledDampingTargets(actual->solver, batch.roll_pvt, batch.pitch_pvt, kd1,
-                                            kd2, motor1_status->speed, motor2_status->speed,
-                                            &speed1, &speed2)) {
+            // 必须先确定实际可下发的 Kd，再反算目标速度，否则驱动限幅会削弱制动力。
+            kd1 = ClampControl(kd1, motor1_ranges_.kd.min, motor1_ranges_.kd.max,
+                               active_control_mode_, "motor1 kd");
+            kd2 = ClampControl(kd2, motor2_ranges_.kd.min, motor2_ranges_.kd.max,
+                               active_control_mode_, "motor2 kd");
+            torque1 = ClampControl(torque1, motor1_ranges_.torque.min, motor1_ranges_.torque.max,
+                                   active_control_mode_, "motor1 torque");
+            torque2 = ClampControl(torque2, motor2_ranges_.torque.min, motor2_ranges_.torque.max,
+                                   active_control_mode_, "motor2 torque");
+            if (!MatchCoupledDampingTargets(actual->solver, roll_pvt, pitch_pvt, kd1, kd2,
+                                            motor1_status->speed, motor2_status->speed, &speed1,
+                                            &speed2)) {
                 ProtectLocked(1, actual->positions);
                 throw JointException(JointError::kDoubleCoupleJointSolveFailed,
                                      "DoubleCoupleJoint coupled PVT target mapping failed");
@@ -1356,27 +1413,72 @@ private:
                                      "DoubleCoupleJoint coupled PVT target outside output range");
             }
         }
-        const JointPose joint_speed{batch.roll_pvt.speed, batch.pitch_pvt.speed};
-        if (JointPVTCommandsLeavingLimit(actual->pose, batch.target, joint_speed, joint_torque.roll,
-                                         joint_torque.pitch) ||
-            MotorPVTCommandsLeavingLimit(actual->positions, positions, speed1, speed2, torque1,
-                                         torque2) ||
-            PVTCommandsEnteringSingularity(actual->pose, batch.target,
-                                           actual->solver.GetTransmission(), joint_speed,
-                                           joint_torque.roll, joint_torque.pitch)) {
+        if (mode == PVTControlMode::HostTorque) {
+            const double scale = MotorTorqueScale(torque1, torque2);
+            LogProtection(active_control_mode_, "motor torque saturation", scale < 1.0);
+            torque1 *= scale;
+            torque2 *= scale;
+            total_joint_torque.roll *= scale;
+            total_joint_torque.pitch *= scale;
+        }
+        bool blocked = false;
+        if (mode == PVTControlMode::MotorPVT) {
+            const JointPose joint_speed{batch.roll_pvt.speed, batch.pitch_pvt.speed};
+            blocked = JointPVTCommandsLeavingLimit(actual->pose, batch.target, joint_speed,
+                                                   joint_torque.roll, joint_torque.pitch) ||
+                      MotorPVTCommandsLeavingLimit(actual->positions, positions, speed1, speed2,
+                                                   torque1, torque2) ||
+                      PVTCommandsEnteringSingularity(actual->pose, batch.target,
+                                                     actual->solver.GetTransmission(), joint_speed,
+                                                     joint_torque.roll, joint_torque.pitch);
+        } else {
+            double total_motor1 = torque1;
+            double total_motor2 = torque2;
+            if (mode == PVTControlMode::HostKpMotorKd) {
+                // 前馈项也可能被限幅。使用将要下发的参数重建合力，再检查实际向外方向。
+                total_motor1 += static_cast<double>(kd1) * (speed1 - motor1_status->speed);
+                total_motor2 += static_cast<double>(kd2) * (speed2 - motor2_status->speed);
+                const auto applied = actual->solver.SolveForwardTorque(total_motor1, total_motor2);
+                if (!IsExecutableSolveResult(applied.status, applied.transmission) ||
+                    !std::isfinite(applied.roll) || !std::isfinite(applied.pitch)) {
+                    ProtectLocked(1, actual->positions);
+                    throw JointException(JointError::kDoubleCoupleJointSolveFailed,
+                                         "DoubleCoupleJoint applied PVT torque is invalid");
+                }
+                double scale = MotorTorqueScale(total_motor1, total_motor2);
+                for (const auto& item : {std::pair{applied.roll, DoubleCoupleJointAxis::Roll},
+                                         std::pair{applied.pitch, DoubleCoupleJointAxis::Pitch}}) {
+                    const double limit = AxisParams(item.second).maxTor_;
+                    if (std::abs(item.first) > limit)
+                        scale = std::min(scale, limit / std::abs(item.first));
+                }
+                LogProtection(active_control_mode_, "applied torque saturation", scale < 1.0);
+                torque1 *= scale;
+                torque2 *= scale;
+                speed1 = motor1_status->speed + scale * (speed1 - motor1_status->speed);
+                speed2 = motor2_status->speed + scale * (speed2 - motor2_status->speed);
+                total_motor1 *= scale;
+                total_motor2 *= scale;
+                total_joint_torque = {applied.roll * scale, applied.pitch * scale};
+            }
+            blocked = AxisCommandLeavingLimit(DoubleCoupleJointAxis::Roll, actual->pose,
+                                              total_joint_torque.roll) ||
+                      AxisCommandLeavingLimit(DoubleCoupleJointAxis::Pitch, actual->pose,
+                                              total_joint_torque.pitch) ||
+                      MotorCommandsLeavingLimit(actual->positions, total_motor1, total_motor2) ||
+                      IsCommandEnteringSingularity(actual->pose, actual->solver.GetTransmission(),
+                                                   DoubleCoupleJointAxis::Roll,
+                                                   total_joint_torque.roll) ||
+                      IsCommandEnteringSingularity(actual->pose, actual->solver.GetTransmission(),
+                                                   DoubleCoupleJointAxis::Pitch,
+                                                   total_joint_torque.pitch);
+        }
+        if (blocked) {
             ProtectLocked(1, actual->positions);
             return;
         }
 
         if (mode == PVTControlMode::HostTorque) {
-            // TorControl 没有 SDK 饱和，必须在发送任一台电机前验证整帧。
-            if (!IsInRange(torque1, motor1_ranges_.torque) ||
-                !IsInRange(torque2, motor2_ranges_.torque) || torque1 < -327.68f ||
-                torque1 > 327.67f || torque2 < -327.68f || torque2 > 327.67f) {
-                ProtectLocked(1, actual->positions);
-                throw JointException(JointError::kDoubleCoupleJointSolveFailed,
-                                     "DoubleCoupleJoint motor torque outside output range");
-            }
             motor1_->TorControl<0>(torque1, 1);
             motor2_->TorControl<0>(torque2, 1);
         } else {
@@ -1388,7 +1490,13 @@ private:
                                    host_kp ? actual->positions.motor2 : positions.motor2, speed2,
                                    torque2);
         }
-        CommitTargetPose(batch.target, target_solver);
+        if (mode == PVTControlMode::MotorPVT) {
+            CommitTargetPose(batch.target, target_solver);
+        } else {
+            // 保存可达的实际机构状态，期望位置另存，不能污染位置/动态模式的几何缓存。
+            CommitTargetPose(actual->pose, actual->solver);
+            host_pvt_target_ = batch.target;
+        }
         roll_pvt_command_ = batch.roll_pvt;
         pitch_pvt_command_ = batch.pitch_pvt;
         ClearHoldProtectionLocked();
@@ -1561,11 +1669,14 @@ private:
             current > params.maxTor_ / motor1_kt_ || current > params.maxTor_ / motor2_kt_ ||
             (current > 0.0f && (!IsInRange(current, motor1_ranges_.current) ||
                                 !IsInRange(current, motor2_ranges_.current))) ||
-            (mode == DynamicControlMode::Speed && std::abs(command) > params.maxSpd_) ||
-            (mode == DynamicControlMode::Torque && std::abs(command) > params.maxTor_)) {
+            (mode == DynamicControlMode::Speed && std::abs(command) > params.maxSpd_)) {
             WarnProtection(active_control_mode_, "invalid dynamic input");
             ProtectLocked(feedback >= 0 && feedback <= 3 ? feedback : 1);
             throw std::invalid_argument("DoubleCoupleJoint invalid dynamic input");
+        }
+        if (mode == DynamicControlMode::Torque) {
+            command = ClampControl(command, -params.maxTor_, params.maxTor_, active_control_mode_,
+                                   "joint torque", AxisScope(axis));
         }
         position_target_feedback_lock_axis_.reset();
         if (position_batch_ || (dynamic_batch_ && dynamic_batch_->mode != mode)) {
@@ -1639,6 +1750,12 @@ private:
         const auto range2 = mode == DynamicControlMode::Speed    ? motor2_ranges_.speed
                             : mode == DynamicControlMode::Torque ? motor2_ranges_.torque
                                                                  : motor2_ranges_.current;
+        if (mapped && mode == DynamicControlMode::Torque) {
+            const double scale = MotorTorqueScale(value1, value2);
+            LogProtection(active_control_mode_, "motor torque saturation", scale < 1.0);
+            value1 *= scale;
+            value2 *= scale;
+        }
         const bool encodable = mode == DynamicControlMode::Speed
                                    ? std::isfinite(value1 * static_cast<float>(30.0 / kPi)) &&
                                          std::isfinite(value2 * static_cast<float>(30.0 / kPi))
@@ -1699,6 +1816,7 @@ private:
             const auto feedback_state =
                 BuildJointFeedbackStateLocked(*motor1_status, *motor2_status);
             if (feedback_state.position_solved && CanFeedbackRefreshTargetLocked()) {
+                host_pvt_target_.reset();
                 target_roll_ = feedback_state.pose.roll;
                 target_pitch_ = feedback_state.pose.pitch;
             }
@@ -1902,6 +2020,7 @@ private:
             const auto feedback_state =
                 BuildJointFeedbackStateLocked(last_motor1_status_, last_motor2_status_);
             if (feedback_state.position_solved && CanFeedbackRefreshTargetLocked()) {
+                host_pvt_target_.reset();
                 target_roll_ = feedback_state.pose.roll;
                 target_pitch_ = feedback_state.pose.pitch;
             }
@@ -1981,6 +2100,7 @@ private:
     std::optional<PositionBatch> position_batch_;
     std::optional<DynamicBatch> dynamic_batch_;
     std::array<std::array<std::optional<AxisDynamicCommand>, 2>, 3> dynamic_commands_{};
+    std::optional<JointPose> host_pvt_target_;  ///< 力矩模式期望位置，可超出机构可达域。
     double target_roll_{0.0};
     double target_pitch_{0.0};
     std::optional<DoubleCoupleJointAxis> position_target_feedback_lock_axis_;

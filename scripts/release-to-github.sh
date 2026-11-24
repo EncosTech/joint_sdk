@@ -4,6 +4,8 @@
 
 set -euo pipefail
 
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 usage() {
   cat <<'EOF'
 Usage: release-to-github.sh [options]
@@ -13,15 +15,13 @@ Required options:
   --github-repo OWNER/REPO       GitHub repository used by the REST API
   --github-repo-url URL          GitHub repository Git URL
   --gitea-url URL                Gitea base URL
-  --gitea-package-owner OWNER    Owner of the Gitea Debian package registry
+  --gitea-package-owner OWNER    Owner of the jointsdk-linux generic package
 
 Optional options:
   --source-ref REF               Source branch or tag (default: stable)
   --source-sha1 SHA1             Exact commit belonging to the source branch
+  --native-run-id ID            Use retained artifacts from this successful native CI run
   --github-branch BRANCH         GitHub snapshot branch (default: stable)
-  --debian-distributions CSV     Debian distributions (default: jammy,noble)
-  --debian-architectures CSV     Debian architectures (default: amd64,arm64)
-  --debian-component NAME        Debian component (default: main)
   --git-user-name NAME           Snapshot commit author name
   --git-user-email EMAIL         Snapshot commit author email
   --github-api-url URL           GitHub REST API base URL
@@ -52,14 +52,12 @@ require_value() {
 source_repo=""
 source_ref="stable"
 source_sha1=""
+native_run_id=""
 github_repo=""
 github_repo_url=""
 github_branch="stable"
 gitea_url=""
 gitea_package_owner=""
-debian_distributions="jammy,noble"
-debian_architectures="amd64,arm64"
-debian_component="main"
 git_user_name="Encos Release Bot"
 git_user_email="release-bot@encos.cn"
 github_api_url="https://api.github.com"
@@ -85,6 +83,11 @@ while (($#)); do
       source_sha1=$2
       shift 2
       ;;
+    --native-run-id)
+      require_value "$1" "${2:-}"
+      native_run_id=$2
+      shift 2
+      ;;
     --github-repo)
       require_value "$1" "${2:-}"
       github_repo=$2
@@ -108,21 +111,6 @@ while (($#)); do
     --gitea-package-owner)
       require_value "$1" "${2:-}"
       gitea_package_owner=$2
-      shift 2
-      ;;
-    --debian-distributions)
-      require_value "$1" "${2:-}"
-      debian_distributions=$2
-      shift 2
-      ;;
-    --debian-architectures)
-      require_value "$1" "${2:-}"
-      debian_architectures=$2
-      shift 2
-      ;;
-    --debian-component)
-      require_value "$1" "${2:-}"
-      debian_component=$2
       shift 2
       ;;
     --git-user-name)
@@ -172,6 +160,9 @@ done
 [[ -n "${source_repo}" ]] || die "--source-repo is required"
 if [[ -n "${source_sha1}" && ! "${source_sha1}" =~ ^[0-9a-fA-F]{40}$ ]]; then
   die "--source-sha1 must be a complete 40-character hexadecimal commit SHA1"
+fi
+if [[ -n "${native_run_id}" && ! "${native_run_id}" =~ ^[1-9][0-9]*$ ]]; then
+  die "--native-run-id must be a positive integer"
 fi
 [[ -n "${github_repo}" ]] || die "--github-repo is required"
 [[ "${github_repo}" == */* ]] || die "--github-repo must use OWNER/REPO format"
@@ -497,96 +488,19 @@ case "${tag_status}" in
 esac
 
 gitea_auth=$(make_basic_auth "${GITEA_USERNAME}" "${GITEA_TOKEN}")
-IFS=',' read -r -a distributions <<<"${debian_distributions}"
-IFS=',' read -r -a architectures <<<"${debian_architectures}"
-package_manifest="${work_dir}/package-manifest.tsv"
-: >"${package_manifest}"
-
-for distribution in "${distributions[@]}"; do
-  distribution=${distribution//[[:space:]]/}
-  [[ -n "${distribution}" ]] || die "empty Debian distribution"
-  for architecture in "${architectures[@]}"; do
-    architecture=${architecture//[[:space:]]/}
-    [[ -n "${architecture}" ]] || die "empty Debian architecture"
-    index_file="${work_dir}/Packages-${distribution}-${architecture}"
-    index_url="${gitea_url%/}/api/packages/${gitea_package_owner}/debian/dists/${distribution}/${debian_component}/binary-${architecture}/Packages"
-    curl --fail-with-body --silent --show-error --location \
-      --header "Authorization: Basic ${gitea_auth}" \
-      --output "${index_file}" "${index_url}"
-    python3 - "${index_file}" "${version}" "${distribution}" "${architecture}" \
-      >>"${package_manifest}" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-index_path, wanted_version, distribution, architecture = sys.argv[1:]
-matches = 0
-for paragraph in Path(index_path).read_text(encoding="utf-8").split("\n\n"):
-    fields = {}
-    for line in paragraph.splitlines():
-        if ": " in line:
-            key, value = line.split(": ", 1)
-            fields[key] = value
-    if fields.get("Package") != "jointsdk":
-        continue
-    if fields.get("Version") != wanted_version:
-        continue
-    required = ("Filename", "Architecture", "Size", "SHA256")
-    if any(not fields.get(field) for field in required):
-        raise SystemExit(f"Incomplete Debian index entry in {index_path}")
-    if fields["Architecture"] != architecture:
-        raise SystemExit(f"Unexpected architecture in {index_path}: {fields['Architecture']}")
-    if not fields["Filename"].endswith(".deb"):
-        raise SystemExit(f"Unexpected package filename in {index_path}")
-    if not fields["Size"].isdigit() or not re.fullmatch(r"[0-9a-fA-F]{64}", fields["SHA256"]):
-        raise SystemExit(f"Invalid package integrity metadata in {index_path}")
-    print(
-        f"{distribution}\t{architecture}\t{fields['Filename']}\t"
-        f"{fields['Size']}\t{fields['SHA256'].lower()}"
-    )
-    matches += 1
-if not matches:
-    raise SystemExit(
-        f"No Debian package version {wanted_version} for {distribution}/{architecture}"
-    )
-PY
-  done
-done
-
-sort -u -o "${package_manifest}" "${package_manifest}"
-[[ -s "${package_manifest}" ]] || die "no Debian packages found for version ${version}"
-
-declare -A downloaded_names=()
-while IFS=$'\t' read -r distribution architecture package_path package_size package_sha256; do
-  package_name=$(basename "${package_path}")
-  asset_name="${package_name%.deb}_${distribution}.deb"
-  existing_path=${downloaded_names["${asset_name}"]:-}
-  if [[ -n "${existing_path}" && "${existing_path}" != "${package_path}" ]]; then
-    die "multiple Debian packages use the asset name ${asset_name}"
-  fi
-  if [[ -n "${existing_path}" ]]; then
-    continue
-  fi
-  downloaded_names["${asset_name}"]=${package_path}
-  package_url="${gitea_url%/}/api/packages/${gitea_package_owner}/debian/${package_path#/}"
-  curl --fail-with-body --silent --show-error --location \
-    --header "Authorization: Basic ${gitea_auth}" \
-    --output "${package_dir}/${asset_name}" "${package_url}"
-  python3 - "${package_dir}/${asset_name}" "${package_size}" "${package_sha256}" <<'PY'
-import hashlib
-import sys
-from pathlib import Path
-
-package_path = Path(sys.argv[1])
-expected_size = int(sys.argv[2])
-expected_sha256 = sys.argv[3]
-content = package_path.read_bytes()
-if len(content) != expected_size:
-    raise SystemExit(f"Size mismatch for {package_path.name}")
-if hashlib.sha256(content).hexdigest() != expected_sha256:
-    raise SystemExit(f"SHA256 mismatch for {package_path.name}")
-PY
-done <"${package_manifest}"
+if [[ -n "${native_run_id}" ]]; then
+  source_commit=$(git -C "${source_dir}" rev-parse HEAD)
+  GITEA_RELEASE_AUTH="${gitea_auth}" python3 "${script_dir}/ci/download-artifact.py" \
+    --native-run-id "${native_run_id}" --gitea-url "${gitea_url}" --source-repo "${source_repo}" \
+    --source-sha "${source_commit}" "${work_dir}/candidates"
+  python3 "${script_dir}/portable/release-packages.py" \
+    stage "${work_dir}/candidates" "${version}" "${package_dir}"
+else
+  registry_url="${gitea_url%/}/api/packages/${gitea_package_owner}/generic/jointsdk-linux/${version}"
+  GITEA_RELEASE_AUTH="${gitea_auth}" python3 "${script_dir}/portable/release-packages.py" \
+    prepare "${registry_url}" "${version}" "${package_dir}"
+fi
+release_assets=("${package_dir}"/*)
 
 git -C "${target_dir}" config user.name "${git_user_name}"
 git -C "${target_dir}" config user.email "${git_user_email}"
@@ -719,7 +633,7 @@ PY
 )
 draft_release_id=${release_id}
 
-for package_file in "${package_dir}"/*.deb; do
+for package_file in "${release_assets[@]}"; do
   package_name=$(basename "${package_file}")
   encoded_name=$(python3 - "${package_name}" <<'PY'
 import sys
@@ -733,7 +647,7 @@ PY
     --header "Authorization: Bearer ${GH_TOKEN}" \
     --header "Accept: application/vnd.github+json" \
     --header "X-GitHub-Api-Version: 2022-11-28" \
-    --header "Content-Type: application/vnd.debian.binary" \
+    --header "Content-Type: application/octet-stream" \
     --data-binary "@${package_file}" \
     "${github_upload_url%/}/repos/${github_repo}/releases/${release_id}/assets?name=${encoded_name}" \
     >/dev/null
@@ -753,5 +667,5 @@ curl --fail-with-body --silent --show-error \
 publication_started=false
 trap - ERR
 
-printf 'Created GitHub release %s with %s Debian package(s).\n' \
-  "${tag}" "${#downloaded_names[@]}"
+printf 'Created GitHub release %s with %s assets.\n' \
+  "${tag}" "${#release_assets[@]}"

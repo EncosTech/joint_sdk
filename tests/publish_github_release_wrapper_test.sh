@@ -20,21 +20,20 @@ OPTIONAL_BRANCHES=develop,feature-x
 GITHUB_RELEASE_REPOSITORY=acme/mirror
 GITHUB_RELEASE_REPOSITORY_URL=https://github.com/acme/mirror.git
 GITEA_URL=https://gitea.test
-GITEA_PACKAGE_OWNER=packages
-DEBIAN_DISTRIBUTIONS=jammy,noble
-DEBIAN_ARCHITECTURES=amd64,arm64
 EOF
 
 main_sha1=0123456789abcdef0123456789abcdef01234567
 dry_run_output=$(bash "${wrapper}" \
   --env-file "${valid_env}" \
   --main-sha1 "${main_sha1}" \
+  --native-run-id 2446 \
   --dry-run)
 [[ "${dry_run_output}" == *"acme/mirror"* ]]
-[[ "${dry_run_output}" == *"jammy,noble"* ]]
+[[ "${dry_run_output}" == *"packages/jointsdk-linux"* ]]
 [[ "${dry_run_output}" == *"main"* ]]
 [[ "${dry_run_output}" == *"develop,feature-x"* ]]
 [[ "${dry_run_output}" == *"${main_sha1}"* ]]
+[[ "${dry_run_output}" == *"Native run ID: 2446"* ]]
 [[ "${dry_run_output}" != *"secret-gitea-token"* ]]
 [[ "${dry_run_output}" != *"secret-github-token"* ]]
 
@@ -72,13 +71,16 @@ EOF
 chmod +x "${test_root}/release-to-github.sh"
 printf '\nMAIN_BRANCH=stable\nGITHUB_MAIN_BRANCH=main\n' >>"${valid_env}"
 export WRAPPER_CALL_LOG="${test_root}/calls"
-bash "${test_root}/publish-github-release.sh" --env-file "${valid_env}" >/dev/null
+bash "${test_root}/publish-github-release.sh" --env-file "${valid_env}" --native-run-id 2446 >/dev/null
 mapfile -t calls <"${WRAPPER_CALL_LOG}"
 [[ "${#calls[@]}" == 3 ]]
 [[ "${calls[0]}" == *"--source-ref stable "* ]]
 [[ "${calls[0]}" == *"--github-branch main "* ]]
+[[ "${calls[0]}" == *"--gitea-package-owner packages "* ]]
+[[ "${calls[0]}" == *"--native-run-id 2446" ]]
 [[ "${calls[1]}" == *"--source-ref develop "* ]]
 [[ "${calls[1]}" == *"--github-branch develop "* ]]
+[[ "${calls[1]}" != *"--native-run-id"* ]]
 [[ "${calls[2]}" == *"--github-branch feature-x "* ]]
 printf '\nGITHUB_MAIN_BRANCH=bad..branch\n' >>"${valid_env}"
 if bash "${wrapper}" --env-file "${valid_env}" --dry-run >/dev/null 2>&1; then

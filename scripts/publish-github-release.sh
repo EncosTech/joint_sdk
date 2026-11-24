@@ -10,11 +10,12 @@ dry_run=false
 from_environment=false
 main_sha1_override=""
 main_sha1_overridden=false
+native_run_id=""
 
 usage() {
   cat <<'EOF'
 Usage: publish-github-release.sh [--env-file PATH] [--from-environment]
-                                 [--main-sha1 SHA1] [--dry-run]
+                                 [--main-sha1 SHA1] [--native-run-id ID] [--dry-run]
 
 Without arguments, load scripts/.env and perform the real publication.
 
@@ -23,6 +24,8 @@ Options:
   --from-environment
                    Do not load a file; use the current environment (for CI)
   --main-sha1 SHA1 Publish this exact commit from the main branch
+  --native-run-id ID
+                   Use retained artifacts from this successful native CI run
   --dry-run        Validate and display non-secret configuration without publishing
   --help           Show this help
 EOF
@@ -48,6 +51,11 @@ while (($#)); do
       [[ -n "${2:-}" ]] || die "--main-sha1 requires a value"
       main_sha1_override=$2
       main_sha1_overridden=true
+      shift 2
+      ;;
+    --native-run-id)
+      [[ -n "${2:-}" ]] || die "--native-run-id requires a value"
+      native_run_id=$2
       shift 2
       ;;
     --from-environment)
@@ -77,6 +85,7 @@ fi
 MAIN_BRANCH=${MAIN_BRANCH:-${SOURCE_REF:-stable}}
 GITHUB_MAIN_BRANCH=${GITHUB_MAIN_BRANCH:-${MAIN_BRANCH}}
 OPTIONAL_BRANCHES=${OPTIONAL_BRANCHES:-}
+GITEA_PACKAGE_OWNER=${GITEA_PACKAGE_OWNER:-packages}
 if [[ "${main_sha1_overridden}" == true ]]; then
   MAIN_SHA1=${main_sha1_override}
 else
@@ -93,15 +102,12 @@ required_variables=(
   GITHUB_RELEASE_REPOSITORY_URL
   GITEA_URL
   GITEA_PACKAGE_OWNER
-  DEBIAN_DISTRIBUTIONS
-  DEBIAN_ARCHITECTURES
 )
 
 for variable_name in "${required_variables[@]}"; do
   [[ -n "${!variable_name:-}" ]] || die "${variable_name} is missing in ${env_file}"
 done
 
-DEBIAN_COMPONENT=${DEBIAN_COMPONENT:-main}
 GIT_USER_NAME=${GIT_USER_NAME:-Encos Release Bot}
 GIT_USER_EMAIL=${GIT_USER_EMAIL:-release-bot@encos.cn}
 GITHUB_API_URL=${GITHUB_API_URL:-https://api.github.com}
@@ -114,6 +120,9 @@ git check-ref-format --branch "${GITHUB_MAIN_BRANCH}" >/dev/null 2>&1 || \
 if [[ -n "${MAIN_SHA1}" && ! "${MAIN_SHA1}" =~ ^[0-9a-fA-F]{40}$ ]]; then
   die "--main-sha1 must be a complete 40-character hexadecimal commit SHA1"
 fi
+if [[ -n "${native_run_id}" && ! "${native_run_id}" =~ ^[1-9][0-9]*$ ]]; then
+  die "--native-run-id must be a positive integer"
+fi
 
 if [[ "${dry_run}" == true ]]; then
   printf 'Configuration is valid. No publication was performed.\n'
@@ -121,10 +130,10 @@ if [[ "${dry_run}" == true ]]; then
   printf '  Main branch: %s\n' "${MAIN_BRANCH}"
   printf '  GitHub main branch: %s\n' "${GITHUB_MAIN_BRANCH}"
   printf '  Main SHA1: %s\n' "${MAIN_SHA1:-<branch head>}"
+  printf '  Native run ID: %s\n' "${native_run_id:-<Gitea package registry>}"
   printf '  Optional branches: %s\n' "${OPTIONAL_BRANCHES:-<none>}"
   printf '  GitHub: %s\n' "${GITHUB_RELEASE_REPOSITORY}"
-  printf '  Debian distributions: %s\n' "${DEBIAN_DISTRIBUTIONS}"
-  printf '  Debian architectures: %s\n' "${DEBIAN_ARCHITECTURES}"
+  printf '  Gitea package: %s/jointsdk-linux\n' "${GITEA_PACKAGE_OWNER}"
   exit 0
 fi
 
@@ -143,9 +152,6 @@ run_branch() {
     --github-branch "${target_branch}" \
     --gitea-url "${GITEA_URL}" \
     --gitea-package-owner "${GITEA_PACKAGE_OWNER}" \
-    --debian-distributions "${DEBIAN_DISTRIBUTIONS}" \
-    --debian-architectures "${DEBIAN_ARCHITECTURES}" \
-    --debian-component "${DEBIAN_COMPONENT}" \
     --git-user-name "${GIT_USER_NAME}" \
     --git-user-email "${GIT_USER_EMAIL}" \
     --github-api-url "${GITHUB_API_URL}" \
@@ -165,6 +171,9 @@ printf 'Processing main branch %s\n' "${MAIN_BRANCH}"
 main_arguments=(--version-output-file "${version_file}")
 if [[ -n "${MAIN_SHA1}" ]]; then
   main_arguments+=(--source-sha1 "${MAIN_SHA1}")
+fi
+if [[ -n "${native_run_id}" ]]; then
+  main_arguments+=(--native-run-id "${native_run_id}")
 fi
 run_branch "${MAIN_BRANCH}" "${main_arguments[@]}"
 main_version=$(<"${version_file}")

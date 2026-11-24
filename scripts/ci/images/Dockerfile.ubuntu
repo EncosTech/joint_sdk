@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 Encos
+# SPDX-License-Identifier: MIT
+ARG BASE_IMAGE=git.in.encos.cn/container/ubuntu:emd-ci-24.04-20261027-v1-amd64
+ARG JS_BUILD_IMAGE=git.in.encos.cn/container/ubuntu:emd-ci-portable-glibc2.28-20261027-v1-amd64
+# JavaScript packages and browser archives are prepared locally with the same
+# Node major/architecture as the final amd64 Ubuntu image. No browser runs here.
+FROM ${JS_BUILD_IMAGE} AS javascript
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/jointsdk-browsers
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml /opt/jointsdk-js/
+WORKDIR /opt/jointsdk-js
+RUN pnpm install --frozen-lockfile --store-dir /opt/jointsdk-pnpm-store && \
+    pnpm exec playwright install chromium && \
+    pnpm exec tsc --version && pnpm exec playwright --version && \
+    sha256sum pnpm-lock.yaml > pnpm-lock.sha256
+
+FROM scratch AS js-files
+COPY --from=javascript /opt/jointsdk-js /jointsdk-js
+COPY --from=javascript /opt/jointsdk-browsers /jointsdk-browsers
+
+# These pinned Ubuntu parents already contain Eigen, GTest, Clang, Emscripten
+# and browser system libraries. Linked layers preserve the existing toolchain.
+FROM ${BASE_IMAGE} AS native
+COPY --link inventory.json /opt/jointsdk/provenance/image-inputs.json
+ENV COREPACK_ENABLE_NETWORK=0
+
+FROM native AS wasm
+COPY --link jointsdk-js /opt/jointsdk-js
+COPY --link jointsdk-browsers /ms-playwright

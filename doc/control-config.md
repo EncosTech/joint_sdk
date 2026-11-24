@@ -132,6 +132,16 @@ SDK 当前允许额外字段，但不代表这些字段会生效。
 不要把 `MasterJoint`、`SlaveJoint` 或旧名 `DoubleMotorJoint` 作为 JSON 的 type。
 PVT 计算模式由运行时 API 设置，不是上述 Config 中的字段。
 
+力矩超限采用限幅：PVT 前馈力矩和 `TorControl` 输入限制在各轴的
+`[-maxTor, maxTor]` 内。`HostTorque` 对完整 PD 合力矩限幅；`HostKpMotorKd`
+同步缩放前馈（含 Kp 项）与 Kd 项，使前馈和合力矩均不超过该轴上限。
+映射后的电机力矩超限时会进一步缩放输出，不因有限力矩超限而停止或抛异常。
+非有限输入、位置限位和奇异位姿仍执行原有保护。
+
+`RJoint` 的 PVT 前馈力矩和 `TorControl` 输入同样按 `maxTor` 限幅。
+其 PVT 位置/速度闭环在电机端执行，`maxTor` 不直接限制电机内部计算的完整 PD 力矩。
+
+
 ## 5. MotorParams：电机配置
 
 | 字段 | 类型 | 必填 / 默认 | 说明 |

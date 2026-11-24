@@ -1,0 +1,12 @@
+{
+  "22.04/amd64": "git.in.encos.cn/container/ubuntu@sha256:487ce783dd8a63a3b7f6839258167458adead26d695cc608fc6503f56335675f",
+  "22.04/arm64": "git.in.encos.cn/container/ubuntu@sha256:8bdd665adcbaef75a093b0bf7b572dcc1286edf7beeddc419ddd506ee6f399fe",
+  "24.04/amd64": "git.in.encos.cn/container/ubuntu@sha256:1f679985de4e58a6fe75184cc2eb2893bafc542e9394bb773099e1e99ab66ec9",
+  "24.04/arm64": "git.in.encos.cn/container/ubuntu@sha256:e3ef6cbe753aba8492bcf9a0f6eea4b454575976fd191f45f46349287770ae36",
+  "portable-glibc2.28/amd64": "git.in.encos.cn/container/ubuntu@sha256:f48273fc304d88a9be3b90fe627b3a5202d2d5661e8bf501b949f295fa6a5a08",
+  "portable-glibc2.28/arm64": "git.in.encos.cn/container/ubuntu@sha256:628f31e7b68b5eb2f051356cc1beeab9afab2f5c25017e11d8405dd4ec19041f",
+  "almalinux-8/amd64": "git.in.encos.cn/container/ubuntu@sha256:746e5a450f3ad7a90871c3d9ed873d4a387a535da3999bcefe5285eecfdec19a",
+  "almalinux-8/arm64": "git.in.encos.cn/container/ubuntu@sha256:e980785418da1f990f883dc3bd013f8bdf1853fa3de7b4c1b373436d32627f3c",
+  "almalinux-9/amd64": "git.in.encos.cn/container/ubuntu@sha256:2252de35fb02fea5cc92e5df9ef6243b0de79766fb4d681dfd1ce8c30cf2d6c8",
+  "almalinux-9/arm64": "git.in.encos.cn/container/ubuntu@sha256:b155ad340ca6d6eb3d9b02a5da80ba22bbf1eb5da49ba9a06bb83925f9b44d16"
+}

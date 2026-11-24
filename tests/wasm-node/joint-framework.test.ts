@@ -980,7 +980,7 @@ describe('DoubleCoupleJoint limits and scaling', () => {
     manager.dispose()
   })
 
-  it('rejects torque control outside motor torque range', async () => {
+  it('proportionally scales torque control to the motor torque range', async () => {
     const adapterId = `${ADAPTER_NAME}_limit_tor`
     const manager = await createManager(runtime, adapterId)
     const initParam = {
@@ -1001,12 +1001,29 @@ describe('DoubleCoupleJoint limits and scaling', () => {
       dcJointDef('limit_tor_pitch', 'pitch', { initParam, adapterId }),
     )
 
+    // Use an unsaturated two-axis command as the reference for the coupling ratio.
     manager.fake!.clearCommandRecords()
-    await roll.torControl(3.0, 1)
-    await expect(pitch.torControl(0, 1)).rejects.toThrow('outside valid range')
-    const recs = manager.fake!.getCommandRecords()
-    expect(recs).toHaveLength(2)
-    expect(recs.every((r) => r.kind === FakeCommandKind.PosControl)).toBe(true)
+    await roll.torControl(0.1, 1)
+    await pitch.torControl(0.05, 1)
+    const reference = [0, 1].map((index) => manager.fake!.getTorCommand(index).torque)
+    const peak = Math.max(...reference.map(Math.abs))
+    expect(peak).toBeGreaterThan(0.2 / 30)
+    expect(peak).toBeLessThan(0.2)
+
+    for (const sign of [1, -1]) {
+      manager.fake!.clearCommandRecords()
+      await roll.torControl(sign * 3.0, 1)
+      await expect(pitch.torControl(sign * 1.5, 1)).resolves.toBeUndefined()
+      const recs = manager.fake!.getCommandRecords()
+      expect(recs).toHaveLength(2)
+      expect(recs.every((r) => r.kind === FakeCommandKind.TorControl)).toBe(true)
+      for (const index of [0, 1]) {
+        const torque = manager.fake!.getTorCommand(index).torque
+        expect(Math.abs(torque)).toBeLessThanOrEqual(0.2 + 1e-6)
+        // TorControl is encoded in 0.01 Nm increments by the motor protocol.
+        expect(Math.abs(torque - sign * reference[index] * 0.2 / peak)).toBeLessThan(0.011)
+      }
+    }
     manager.dispose()
   })
 

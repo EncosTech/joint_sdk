@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: MIT
 
 cmake_minimum_required(VERSION 3.20)
-project(joint_sdk VERSION 1.5.3 LANGUAGES CXX)
+project(joint_sdk VERSION 1.5.9 LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
+
+set(JOINT_SDK_INSTALL_INCLUDEDIR "${CMAKE_INSTALL_INCLUDEDIR}/jointsdk")
 
 set(JOINT_SDK_BOOST_PREPROCESSOR_INCLUDE_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/external/boost_preprocessor/include"
@@ -68,7 +70,13 @@ if(NOT EXISTS "${JOINT_SDK_COUPLE_JOINT_SOLVER_DIR}/CMakeLists.txt")
 endif()
 
 set(COUPLE_JOINT_BUILD_TESTS ${JOINT_SDK_BUILD_TESTS})
-add_subdirectory("${JOINT_SDK_COUPLE_JOINT_SOLVER_DIR}")
+# Scope the bundled solver's header destination without changing its source or
+# the parent project's GNUInstallDirs settings (library/config paths stay intact).
+function(joint_sdk_add_solver)
+    set(CMAKE_INSTALL_INCLUDEDIR "${JOINT_SDK_INSTALL_INCLUDEDIR}")
+    add_subdirectory("${JOINT_SDK_COUPLE_JOINT_SOLVER_DIR}")
+endfunction()
+joint_sdk_add_solver()
 
 add_library(joint_sdk INTERFACE)
 add_library(joint_sdk::joint_sdk ALIAS joint_sdk)
@@ -78,7 +86,7 @@ target_compile_features(joint_sdk INTERFACE cxx_std_17)
 target_include_directories(joint_sdk INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${JOINT_SDK_BOOST_PREPROCESSOR_INCLUDE_DIR}>
-    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    $<INSTALL_INTERFACE:${JOINT_SDK_INSTALL_INCLUDEDIR}>
 )
 
 target_link_libraries(joint_sdk INTERFACE
@@ -101,12 +109,12 @@ if(NOT JOINT_SDK_BUILD_WASM_BINDINGS)
     )
 
     install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/"
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        DESTINATION ${JOINT_SDK_INSTALL_INCLUDEDIR}
         FILES_MATCHING PATTERN "*.h"
     )
 
     install(DIRECTORY "${JOINT_SDK_BOOST_PREPROCESSOR_INCLUDE_DIR}/boost"
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        DESTINATION ${JOINT_SDK_INSTALL_INCLUDEDIR}
     )
 
     install(EXPORT joint_sdkTargets
@@ -134,67 +142,7 @@ if(NOT JOINT_SDK_BUILD_WASM_BINDINGS)
     )
 endif()
 
-# CPack configuration for generating DEB packages
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set(CPACK_GENERATOR "DEB")
-    set(CPACK_SOURCE_GENERATOR "")
-    set(CPACK_BINARY_STGZ "OFF")
-    set(CPACK_BINARY_TGZ "OFF")
-    set(CPACK_BINARY_TZ "OFF")
-    set(CPACK_BINARY_TBZ2 "OFF")
-    set(CPACK_BINARY_TXZ "OFF")
-    set(CPACK_BINARY_RPM "OFF")
-
-    find_program(DPKG_DEB_EXECUTABLE dpkg-deb)
-    if(DPKG_DEB_EXECUTABLE)
-        set(CPACK_BINARY_DEB "ON")
-    else()
-        message(WARNING "dpkg-deb not found: DEB package generator disabled")
-        set(CPACK_BINARY_DEB "OFF")
-    endif()
-
-    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
-        DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/jointsdk")
-    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/debian/copyright"
-        DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/jointsdk")
-    set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
-    set(CPACK_PACKAGE_NAME "JointSDK")
-    set(CPACK_PACKAGE_VENDOR "Encos")
-    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
-        "joint_sdk - C++17 header-only joint control library")
-    set(CPACK_PACKAGE_DESCRIPTION
-        "joint_sdk is a header-only C++17 library for joint control based on encos_driver. "
-        "Provides three joint abstractions: RJoint (limited direct-drive rotary joint), "
-        "ContinuousJoint (unlimited rotary joint), and DoubleCoupleJoint (dual-motor closed-chain "
-        "joint). Features include PVT/position/speed/"
-        "torque/current control modes, JSON schema generation, and built-in singularity protection.")
-    set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
-    set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
-    set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
-    set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
-
-    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Encos Team <Sales002@encos.cn>")
-    set(CPACK_DEBIAN_PACKAGE_SECTION "libdevel")
-    set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
-    set(CPACK_DEBIAN_PACKAGE_DEPENDS
-        "libencosdriver (>= 4.0.0), libeigen3-dev, libstdc++6, libc6")
-    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://encos.cn")
-    set(CPACK_DEBIAN_PACKAGE_SHLIBS OFF)
-
-    execute_process(
-        COMMAND dpkg --print-architecture
-        OUTPUT_VARIABLE CPACK_DEBIAN_PACKAGE_ARCHITECTURE
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
-    if(NOT CPACK_DEBIAN_PACKAGE_ARCHITECTURE)
-        set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
-    endif()
-
-    set(CPACK_PACKAGING_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
-    set(CPACK_PACKAGE_FILE_NAME
-        "${CPACK_PACKAGE_NAME}_${CPACK_PACKAGE_VERSION}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}")
-endif()
+include(cmake/JointSdkPackaging.cmake)
 
 if(JOINT_SDK_BUILD_WASM_BINDINGS AND NOT (EMSCRIPTEN OR CMAKE_SYSTEM_NAME STREQUAL "Emscripten"))
     message(FATAL_ERROR "JOINT_SDK_BUILD_WASM_BINDINGS is only valid under Emscripten")
